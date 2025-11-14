@@ -39,7 +39,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLASSIFICATION_MODEL_PATH = os.path.join(BASE_DIR, "models/resnet50_skin_disease_complete.pth")
 SEGMENTATION_MODEL_PATH = os.path.join(BASE_DIR, "models/medsam2_dermatology_best_aug2.pth")
-SKIN_CONDITION_MODEL_PATH = os.path.join(BASE_DIR, "models/efficientnet-skin-conditions-classifier.pth")
+SKIN_CONDITION_MODEL_PATH = os.path.join(BASE_DIR, "models/efficient-net-skin-conditions-classifier.pth")
 
 # Load ResNet50 classification model
 def load_classification_model():
@@ -275,7 +275,6 @@ async def root():
             "classification_model": "loaded" if classification_model else "not loaded",
             "segmentation_model": "loaded" if segmentation_model else "not loaded",
             "skin_condition_model": "loaded" if skin_condition_model else "not loaded",
-            "face_detection_model": "loaded" if face_detection_model else "not loaded"
         },
         "endpoints": {
             "classify_disease": "/api/classification-disease",

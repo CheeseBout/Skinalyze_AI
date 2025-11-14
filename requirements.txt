@@ -26,3 +26,6 @@ python-dotenv==1.0.0
 fastapi==0.109.0
 uvicorn==0.27.0
 python-multipart==0.0.6
+
+# Segment Anything Model 2
+# pip install git+https://github.com/facebookresearch/segment-anything-2.git
