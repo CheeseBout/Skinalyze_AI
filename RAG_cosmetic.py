@@ -22,10 +22,12 @@ import json
 # =============================================================================
 # CẤU HÌNH - THAY ĐỔI CÁC ĐƯỜNG DẪN NÀY
 # =============================================================================
-CHUNKS_FILE = Path(r"D:\rag-cosmetic-chatbot\data\product_chunks.txt")
-PERSIST_DIRECTORY = Path(r"D:\rag-cosmetic-chatbot\db_chroma")
+BASE_DIR = Path(__file__).parent.absolute()
+
+CHUNKS_FILE = BASE_DIR / "data" / "product_chunks.txt"
+PERSIST_DIRECTORY = BASE_DIR / "db_chroma"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-CHAT_HISTORY_DIR = Path(r"D:\rag-cosmetic-chatbot\chat-history")  # Thư mục lưu lịch sử chat
+CHAT_HISTORY_DIR = BASE_DIR / "chat-history"  
 
 # Global cache cho embeddings để tránh load lại
 _CACHED_EMBEDDINGS = None

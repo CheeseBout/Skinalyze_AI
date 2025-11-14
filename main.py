@@ -10,7 +10,6 @@ import numpy as np
 from typing import Dict
 import os
 from fastapi.responses import StreamingResponse
-import cv2
 
 app = FastAPI(title="AI Dermatology API")
 
@@ -249,41 +248,10 @@ def load_segmentation_model():
         traceback.print_exc()
         return None
 
-# Load YOLOv8 face detection model
-def load_face_detection_model():
-    if not os.path.exists(FACE_DETECTION_MODEL_PATH):
-        print(f"Face detection model not found at: {FACE_DETECTION_MODEL_PATH}")
-        return None
-    
-    try:
-        # Try using ultralytics YOLO
-        try:
-            from ultralytics import YOLO
-            model = YOLO(FACE_DETECTION_MODEL_PATH)
-            model.to(device)
-            print("YOLOv8 face detection model loaded successfully!")
-            return model
-        except ImportError:
-            print("ultralytics not installed. Installing...")
-            import subprocess
-            subprocess.check_call(['pip', 'install', 'ultralytics'])
-            from ultralytics import YOLO
-            model = YOLO(FACE_DETECTION_MODEL_PATH)
-            model.to(device)
-            print("YOLOv8 face detection model loaded successfully!")
-            return model
-            
-    except Exception as e:
-        print(f"Error loading face detection model: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
 # Initialize models
 classification_model = load_classification_model()
 segmentation_model = load_segmentation_model()
 skin_condition_model = load_skin_condition_model()
-face_detection_model = load_face_detection_model()
 
 # Image preprocessing for classification
 classify_transform = transforms.Compose([
