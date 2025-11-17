@@ -1,3 +1,11 @@
+"""
+AI Dermatology & Cosmetic Consultant API
+Stateless API for NestJS Backend Integration
+"""
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,28 +16,29 @@ from PIL import Image
 import io
 import base64
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import os
-from pathlib import Path
 import time
 from datetime import datetime
 
-# Import from RAG_cosmetic.py for chatbot functionality
 from RAG_cosmetic import (
     setup_api_key,
     load_or_create_vectorstore,
     setup_rag_chain,
     analyze_skin_image,
-    CHAT_HISTORY_DIR
+    check_severity,
+    build_image_analysis_query
 )
 
+# =============================================================================
+# FASTAPI APP
+# =============================================================================
 app = FastAPI(
     title="AI Dermatology & Cosmetic Consultant API",
-    description="Unified API for skin disease classification, segmentation, and cosmetic consultation using RAG and Vision AI",
-    version="2.0.0"
+    description="Stateless API for skin disease classification, segmentation, and cosmetic consultation",
+    version="3.0.0"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,35 +48,70 @@ app.add_middleware(
 )
 
 # =============================================================================
-# GLOBAL VARIABLES - For RAG Chatbot
+# CONFIGURATION
 # =============================================================================
-rag_chain = None
-conversation_sessions = {}  # Store conversation context for each session_id
+SKIN_CLASSES = [
+    'Acne', 'Actinic_Keratosis', 'Drug_Eruption', 'Eczema', 'Normal', 
+    'Psoriasis', 'Rosacea', 'Seborrh_Keratoses', 'Sun_Sunlight_Damage', 
+    'Tinea', 'Warts'
+]
+
+SKIN_CONDITION_CLASSES = ['Dry', 'Normal', 'Oily']
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_PATHS = {
+    'classification': os.path.join(BASE_DIR, "models/resnet50_skin_disease_complete.pth"),
+    'segmentation': os.path.join(BASE_DIR, "models/medsam2_dermatology_best_aug2.pth"),
+    'skin_condition': os.path.join(BASE_DIR, "models/efficient-net-skin-conditions-classifier.pth")
+}
+
+IMAGE_TRANSFORMS = {
+    'classification': transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ]),
+    'condition': transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+}
 
 # =============================================================================
-# PYDANTIC MODELS - Request/Response Schemas for RAG Chatbot
+# GLOBAL STATE
+# =============================================================================
+class AppState:
+    rag_chain = None
+    classification_model = None
+    segmentation_model = None
+    skin_condition_model = None
+
+state = AppState()
+
+# =============================================================================
+# PYDANTIC MODELS
 # =============================================================================
 class ChatRequest(BaseModel):
     question: str
-    session_id: Optional[str] = None
+    conversation_history: Optional[List[Dict[str, str]]] = None  # [{"role": "user|ai", "content": "..."}]
 
 class ChatResponse(BaseModel):
     answer: str
     response_time: float
-    session_id: str
     timestamp: str
 
 class ImageAnalysisRequest(BaseModel):
     image_base64: str
     additional_text: Optional[str] = None
-    session_id: Optional[str] = None
 
 class ImageAnalysisResponse(BaseModel):
     skin_analysis: str
     product_recommendation: str
     severity_warning: Optional[str] = None
     response_time: float
-    session_id: str
     timestamp: str
 
 class HealthResponse(BaseModel):
@@ -80,611 +124,374 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 # =============================================================================
-# SKIN DISEASE CLASSIFICATION - Define classes
-# =============================================================================
-SKIN_CLASSES = [
-    'Acne', 'Actinic_Keratosis', 'Drug_Eruption', 'Eczema', 'Normal', 
-    'Psoriasis', 'Rosacea', 'Seborrh_Keratoses', 'Sun_Sunlight_Damage', 
-    'Tinea', 'Warts'
-]
-
-SKIN_CONDITION_CLASSES = ['Dry', 'Normal', 'Oily']
-
-# Device configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Model paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CLASSIFICATION_MODEL_PATH = os.path.join(BASE_DIR, "models/resnet50_skin_disease_complete.pth")
-SEGMENTATION_MODEL_PATH = os.path.join(BASE_DIR, "models/medsam2_dermatology_best_aug2.pth")
-SKIN_CONDITION_MODEL_PATH = os.path.join(BASE_DIR, "models/efficient-net-skin-conditions-classifier.pth")
-
-# =============================================================================
-# MODEL LOADING FUNCTIONS
+# MODEL LOADING
 # =============================================================================
 def load_classification_model():
-    model = models.resnet50(weights=None)
-    num_features = model.fc.in_features
-    
-    model.fc = nn.Sequential(
-        nn.Dropout(0.5),
-        nn.Linear(num_features, 512),
-        nn.ReLU(),
-        nn.BatchNorm1d(512),
-        nn.Dropout(0.5),
-        nn.Linear(512, len(SKIN_CLASSES))
-    )
-    
-    if not os.path.exists(CLASSIFICATION_MODEL_PATH):
-        print(f"Classification model not found at: {CLASSIFICATION_MODEL_PATH}")
+    """Load ResNet50 classification model"""
+    model_path = MODEL_PATHS['classification']
+    if not os.path.exists(model_path):
+        print(f"⚠️  Classification model not found")
         return None
     
     try:
-        checkpoint = torch.load(CLASSIFICATION_MODEL_PATH, map_location=device, weights_only=False)
+        model = models.resnet50(weights=None)
+        num_features = model.fc.in_features
         
-        if isinstance(checkpoint, dict):
-            if 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-                print(f"Loaded from checkpoint - Epoch: {checkpoint.get('epoch', 'N/A')}")
-                print(f"Test Accuracy: {checkpoint.get('test_acc', 'N/A')}")
-            elif 'state_dict' in checkpoint:
-                state_dict = checkpoint['state_dict']
-            else:
-                state_dict = checkpoint
-        else:
-            state_dict = checkpoint
+        model.fc = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(num_features, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),
+            nn.Linear(512, len(SKIN_CLASSES))
+        )
+        
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
         
         model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
-        print(f"Classification model loaded successfully!")
+        print(f"✅ Classification model loaded")
         return model
     except Exception as e:
-        print(f"Error loading classification model: {e}")
+        print(f"❌ Error loading classification model: {e}")
         return None
 
 def load_skin_condition_model():
-    if not os.path.exists(SKIN_CONDITION_MODEL_PATH):
-        print(f"Skin condition model not found at: {SKIN_CONDITION_MODEL_PATH}")
+    """Load EfficientNet skin condition model"""
+    model_path = MODEL_PATHS['skin_condition']
+    if not os.path.exists(model_path):
+        print(f"⚠️  Skin condition model not found")
         return None
     
     try:
-        checkpoint = torch.load(SKIN_CONDITION_MODEL_PATH, map_location=device, weights_only=False)
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
         
-        model = models.efficientnet_b0(weights=None)
-        num_features = model.classifier[1].in_features
-        model.classifier[1] = nn.Linear(num_features, len(SKIN_CONDITION_CLASSES))
-        
-        if isinstance(checkpoint, dict):
-            if 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-                print(f"Skin condition model - Epoch: {checkpoint.get('epoch', 'N/A')}")
-                print(f"Skin condition model - Accuracy: {checkpoint.get('test_acc', checkpoint.get('val_acc', 'N/A'))}")
-            elif 'state_dict' in checkpoint:
-                state_dict = checkpoint['state_dict']
-            else:
-                state_dict = checkpoint
-        else:
-            state_dict = checkpoint
-        
-        model.load_state_dict(state_dict, strict=False)
-        model.to(device)
-        model.eval()
-        print(f"Skin condition model loaded successfully!")
-        return model
-        
-    except Exception as e:
-        print(f"Error loading skin condition model: {e}")
-        
-        for variant_name, variant_model in [
+        for variant_name, variant_fn in [
+            ('EfficientNet-B0', models.efficientnet_b0),
             ('EfficientNet-B1', models.efficientnet_b1),
             ('EfficientNet-B2', models.efficientnet_b2),
-            ('EfficientNet-B3', models.efficientnet_b3),
         ]:
             try:
-                print(f"Trying {variant_name}...")
-                model = variant_model(weights=None)
+                model = variant_fn(weights=None)
                 num_features = model.classifier[1].in_features
                 model.classifier[1] = nn.Linear(num_features, len(SKIN_CONDITION_CLASSES))
-                
-                checkpoint = torch.load(SKIN_CONDITION_MODEL_PATH, map_location=device, weights_only=False)
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    state_dict = checkpoint['model_state_dict']
-                else:
-                    state_dict = checkpoint
-                
                 model.load_state_dict(state_dict, strict=False)
                 model.to(device)
                 model.eval()
-                print(f"Skin condition model loaded as {variant_name}!")
+                print(f"✅ Skin condition model loaded ({variant_name})")
                 return model
             except:
                 continue
-        
+        return None
+    except Exception as e:
+        print(f"❌ Error loading skin condition model: {e}")
         return None
 
 def load_segmentation_model():
-    if not os.path.exists(SEGMENTATION_MODEL_PATH):
-        print(f"Segmentation model not found at: {SEGMENTATION_MODEL_PATH}")
+    """Load SAM2 segmentation model"""
+    model_path = MODEL_PATHS['segmentation']
+    if not os.path.exists(model_path):
+        print(f"⚠️  Segmentation model not found")
         return None
     
     try:
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
+        import sam2
         
-        checkpoint = torch.load(SEGMENTATION_MODEL_PATH, map_location=device, weights_only=False)
-        print(f"Segmentation checkpoint loaded with keys: {checkpoint.keys() if isinstance(checkpoint, dict) else 'model object'}")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        if not isinstance(checkpoint, dict) or 'config' not in checkpoint:
+            return None
         
-        if isinstance(checkpoint, dict) and 'config' in checkpoint:
-            config = checkpoint['config']
-            print(f"Model config found: {config}")
-            
-            sam2_config = config.get('sam2_config', 'sam2.1_hiera_t')
-            print(f"Using SAM2 config: {sam2_config}")
-            
-            config_map = {
-                'sam2.1_hiera_t': 'configs/sam2.1/sam2.1_hiera_t.yaml',
-                'sam2.1_hiera_t512': 'configs/sam2.1/sam2.1_hiera_t.yaml',
-                'sam2.1_hiera_s': 'configs/sam2.1/sam2.1_hiera_s.yaml',
-                'sam2.1_hiera_b+': 'configs/sam2.1/sam2.1_hiera_b+.yaml',
-                'sam2.1_hiera_l': 'configs/sam2.1/sam2.1_hiera_l.yaml',
-                'sam2_hiera_t': 'configs/sam2/sam2_hiera_t.yaml',
-                'sam2_hiera_s': 'configs/sam2/sam2_hiera_s.yaml',
-                'sam2_hiera_b+': 'configs/sam2/sam2_hiera_b+.yaml',
-                'sam2_hiera_l': 'configs/sam2/sam2_hiera_l.yaml',
-            }
-            
-            config_file = config_map.get(sam2_config, 'configs/sam2.1/sam2.1_hiera_t.yaml')
-            
-            import sam2
-            sam2_path = os.path.dirname(sam2.__file__)
-            config_path = os.path.join(sam2_path, '..', config_file)
-            
-            if not os.path.exists(config_path):
-                config_path = os.path.join(sam2_path, config_file)
-            
-            if not os.path.exists(config_path):
-                print(f"Config file not found at {config_path}, using model name directly")
-                config_path = sam2_config
-            
-            print(f"Loading SAM2 with config: {config_path}")
-            
-            sam2_model = build_sam2(
-                config_file=config_path,
-                ckpt_path=None,
-                device=device,
-                mode='eval',
-                apply_postprocessing=False
-            )
-            
-            if 'model_state_dict' in checkpoint:
-                missing_keys, unexpected_keys = sam2_model.load_state_dict(
-                    checkpoint['model_state_dict'], 
-                    strict=False
-                )
-                if missing_keys:
-                    print(f"Missing keys: {len(missing_keys)} keys")
-                if unexpected_keys:
-                    print(f"Unexpected keys: {len(unexpected_keys)} keys")
-                print(f"Loaded model weights - Best Dice: {checkpoint.get('best_val_dice', 'N/A')}")
-            
-            predictor = SAM2ImagePredictor(sam2_model)
-            print("SAM2 segmentation model loaded successfully!")
-            return predictor
-            
-    except ImportError as ie:
-        print(f"Import error: {ie}")
-        print("Make sure SAM2 is properly installed")
-        return None
+        config = checkpoint['config']
+        sam2_config = config.get('sam2_config', 'sam2.1_hiera_t')
+        
+        config_map = {
+            'sam2.1_hiera_t': 'configs/sam2.1/sam2.1_hiera_t.yaml',
+            'sam2.1_hiera_s': 'configs/sam2.1/sam2.1_hiera_s.yaml',
+        }
+        
+        config_file = config_map.get(sam2_config, 'configs/sam2.1/sam2.1_hiera_t.yaml')
+        sam2_path = os.path.dirname(sam2.__file__)
+        config_path = os.path.join(sam2_path, '..', config_file)
+        
+        if not os.path.exists(config_path):
+            config_path = os.path.join(sam2_path, config_file)
+        
+        sam2_model = build_sam2(
+            config_file=config_path,
+            ckpt_path=None,
+            device=device,
+            mode='eval',
+            apply_postprocessing=False
+        )
+        
+        if 'model_state_dict' in checkpoint:
+            sam2_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        
+        predictor = SAM2ImagePredictor(sam2_model)
+        print("✅ SAM2 segmentation model loaded")
+        return predictor
+        
     except Exception as e:
-        print(f"Error loading segmentation model: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error loading segmentation model: {e}")
         return None
-
-# Initialize models
-classification_model = load_classification_model()
-segmentation_model = load_segmentation_model()
-skin_condition_model = load_skin_condition_model()
-
-# Image preprocessing
-classify_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-condition_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
 
 # =============================================================================
-# STARTUP EVENT - Initialize RAG Chain
+# STARTUP
 # =============================================================================
 @app.on_event("startup")
 async def startup_event():
-    """Initialize RAG chain when server starts"""
-    global rag_chain
-    
+    """Initialize models on startup"""
     print("\n" + "=" * 80)
-    print("🚀 KHỞI ĐỘNG AI DERMATOLOGY & COSMETIC CONSULTANT API SERVER")
+    print("🚀 STARTING AI DERMATOLOGY & COSMETIC API SERVER")
     print("=" * 80)
     
+    # Load models
+    state.classification_model = load_classification_model()
+    state.segmentation_model = load_segmentation_model()
+    state.skin_condition_model = load_skin_condition_model()
+    
+    # Initialize RAG
     try:
-        # 1. Setup API Key
         setup_api_key()
-        
-        # 2. Load/Create Vector Store
         db, embeddings = load_or_create_vectorstore()
         
         if db is None:
-            print("\n⚠️ CẢNH BÁO: Không thể khởi tạo Vector Store!")
-            print("   Các endpoint RAG chatbot sẽ không hoạt động.")
+            print("\n⚠️  Vector Store not initialized")
         else:
-            # 3. Setup RAG Chain
-            rag_chain = setup_rag_chain(db)
-            print("\n✅ RAG Chatbot đã sẵn sàng!")
+            state.rag_chain = setup_rag_chain(db)
+            print("\n✅ RAG Chatbot ready")
         
-        print("\n✅ Server đã sẵn sàng phục vụ!")
+        print("\n✅ Server ready!")
         print("📚 API Documentation: http://localhost:8000/docs")
-        print("🔗 Alternative Docs: http://localhost:8000/redoc")
         print("=" * 80 + "\n")
         
     except Exception as e:
-        print(f"\n❌ LỖI khi khởi tạo RAG chain: {e}")
-        print("   Các endpoint classification/segmentation vẫn hoạt động bình thường.\n")
+        print(f"\n❌ Error initializing RAG: {e}\n")
 
 # =============================================================================
-# API ENDPOINTS - Health Check & Root
+# HEALTH CHECK
 # =============================================================================
 @app.get("/", response_model=HealthResponse)
-async def root():
-    """Root endpoint with system status"""
-    return HealthResponse(
-        status="online",
-        message="AI Dermatology & Cosmetic Consultant API đang hoạt động",
-        vectorstore_status="ready" if rag_chain is not None else "not_initialized",
-        classification_model_status="loaded" if classification_model else "not_loaded",
-        segmentation_model_status="loaded" if segmentation_model else "not_loaded",
-        skin_condition_model_status="loaded" if skin_condition_model else "not_loaded",
-        timestamp=datetime.now().isoformat()
-    )
-
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Detailed health check endpoint"""
+    """Health check endpoint"""
     return HealthResponse(
-        status="healthy",
-        message="All systems operational",
-        vectorstore_status="ready" if rag_chain is not None else "not_initialized",
-        classification_model_status="loaded" if classification_model else "not_loaded",
-        segmentation_model_status="loaded" if segmentation_model else "not_loaded",
-        skin_condition_model_status="loaded" if skin_condition_model else "not_loaded",
+        status="healthy" if state.rag_chain else "degraded",
+        message="AI Dermatology & Cosmetic API",
+        vectorstore_status="ready" if state.rag_chain else "not_initialized",
+        classification_model_status="loaded" if state.classification_model else "not_loaded",
+        segmentation_model_status="loaded" if state.segmentation_model else "not_loaded",
+        skin_condition_model_status="loaded" if state.skin_condition_model else "not_loaded",
         timestamp=datetime.now().isoformat()
     )
 
 # =============================================================================
-# API ENDPOINTS - RAG Chatbot (from api.py)
+# RAG CHATBOT ENDPOINTS (STATELESS)
 # =============================================================================
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
-    Chat with RAG-powered cosmetic consultant
+    Stateless chat endpoint - NestJS handles session management
     
-    - **question**: User's question about cosmetics/skincare
-    - **session_id**: Session ID (optional) to maintain conversation context
+    - **question**: User's question
+    - **conversation_history**: Optional conversation context from NestJS DB
     """
-    if rag_chain is None:
-        raise HTTPException(
-            status_code=503,
-            detail="RAG chain chưa được khởi tạo. Vui lòng kiểm tra logs server."
-        )
+    if state.rag_chain is None:
+        raise HTTPException(status_code=503, detail="RAG chain not initialized")
     
     try:
         start_time = time.time()
         
-        session_id = request.session_id or f"session_{int(time.time() * 1000)}"
-        
-        if session_id not in conversation_sessions:
-            conversation_sessions[session_id] = []
-        
-        conversation_context = conversation_sessions[session_id]
-        
-        if conversation_context:
-            recent_context = conversation_context[-3:]
-            context_str = "\n".join([
-                f"User đã hỏi: {ctx[0]}\nBot đã trả lời: {ctx[1][:200]}..." 
-                for ctx in recent_context
-            ])
+        # Build query with history if provided
+        query = request.question
+        if request.conversation_history:
+            # Convert NestJS format to context
+            context_pairs = []
+            for i in range(0, len(request.conversation_history) - 1, 2):
+                if i + 1 < len(request.conversation_history):
+                    user_msg = request.conversation_history[i]
+                    ai_msg = request.conversation_history[i + 1]
+                    if user_msg.get('role') == 'user' and ai_msg.get('role') == 'ai':
+                        context_pairs.append((
+                            user_msg.get('content', ''),
+                            ai_msg.get('content', '')
+                        ))
             
-            query_with_context = f"""LỊCH SỬ HỘI THOẠI GẦN ĐÂY:
+            if context_pairs:
+                recent = context_pairs[-3:]  # Last 3 exchanges
+                context_str = "\n".join([
+                    f"User: {ctx[0]}\nAI: {ctx[1][:200]}..." 
+                    for ctx in recent
+                ])
+                
+                query = f"""CONVERSATION HISTORY:
 {context_str}
 
-CÂU HỎI HIỆN TẠI: {request.question}
+CURRENT QUESTION: {request.question}
 
-Hãy trả lời dựa trên LỊCH SỬ và câu hỏi hiện tại."""
-            response = rag_chain.invoke(query_with_context)
-        else:
-            response = rag_chain.invoke(request.question)
+Answer based on history and current question."""
         
-        conversation_context.append((request.question, response))
-        conversation_sessions[session_id] = conversation_context
-        
-        elapsed_time = time.time() - start_time
+        # Get response
+        response = state.rag_chain.invoke(query)
         
         return ChatResponse(
             answer=response,
-            response_time=round(elapsed_time, 2),
-            session_id=session_id,
+            response_time=round(time.time() - start_time, 2),
             timestamp=datetime.now().isoformat()
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi xử lý: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.post("/analyze-image", response_model=ImageAnalysisResponse)
 async def analyze_image_endpoint(
     image: UploadFile = File(...),
-    additional_text: Optional[str] = Form(None),
-    session_id: Optional[str] = Form(None)
+    additional_text: Optional[str] = Form(None)
 ):
     """
-    Analyze skin image and recommend cosmetic products
+    Analyze skin image - STATELESS (no file storage)
     
-    - **image**: Skin image file (jpg, png, webp, etc.)
-    - **additional_text**: Additional text query (optional)
-    - **session_id**: Session ID (optional)
+    - **image**: Skin image file
+    - **additional_text**: Additional query text
     """
-    if rag_chain is None:
-        raise HTTPException(
-            status_code=503,
-            detail="RAG chain chưa được khởi tạo."
-        )
+    if state.rag_chain is None:
+        raise HTTPException(status_code=503, detail="RAG chain not initialized")
     
     try:
         start_time = time.time()
         
-        session_id = session_id or f"session_{int(time.time() * 1000)}"
-        
+        # Read image directly into memory (no temp file)
         image_bytes = await image.read()
         
-        temp_dir = Path("temp_uploads")
-        temp_dir.mkdir(exist_ok=True)
-        temp_image_path = temp_dir / f"{int(time.time() * 1000)}_{image.filename}"
+        # Analyze using bytes directly
+        skin_analysis = analyze_skin_image(image_bytes)
+        if not skin_analysis:
+            raise HTTPException(status_code=400, detail="Cannot analyze image")
         
-        with open(temp_image_path, "wb") as f:
-            f.write(image_bytes)
+        # Check severity and build query
+        is_severe = check_severity(skin_analysis)
+        rag_query = build_image_analysis_query(skin_analysis, additional_text, is_severe)
         
-        try:
-            skin_analysis = analyze_skin_image(str(temp_image_path))
-            
-            if not skin_analysis:
-                raise HTTPException(status_code=400, detail="Không thể phân tích ảnh")
-            
-            analysis_upper = skin_analysis.upper()
-            is_very_severe = 'RẤT NẶNG' in analysis_upper or 'RẤT NGHIÊM TRỌNG' in analysis_upper
-            
-            if additional_text:
-                if is_very_severe:
-                    rag_query = f"""Tình trạng da (RẤT NGHIÊM TRỌNG - CẦN GẶP BÁC SĨ):
-{skin_analysis}
-
-Yêu cầu: {additional_text}
-
-Gợi ý 1-2 sản phẩm HỖ TRỢ NHẸ NHÀNG (không thay thế điều trị y khoa). 
-NHẤN MẠNH: Cần gặp bác sĩ da liễu."""
-                else:
-                    rag_query = f"""Tình trạng da:
-{skin_analysis}
-
-Yêu cầu: {additional_text}
-
-Tư vấn 2-3 sản phẩm CỤ THỂ phù hợp."""
-            else:
-                if is_very_severe:
-                    rag_query = f"""Tình trạng da (RẤT NGHIÊM TRỌNG):
-{skin_analysis}
-
-Gợi ý 1-2 sản phẩm HỖ TRỢ. NHẤN MẠNH: Cần gặp bác sĩ."""
-                else:
-                    rag_query = f"""Tình trạng da:
-{skin_analysis}
-
-Tư vấn 2-3 sản phẩm phù hợp."""
-            
-            product_recommendation = rag_chain.invoke(rag_query)
-            
-            elapsed_time = time.time() - start_time
-            
-            severity_warning = None
-            if is_very_severe:
-                severity_warning = "⚠️ CẢNH BÁO: Tình trạng da RẤT NGHIÊM TRỌNG! Vui lòng đặt lịch gặp bác sĩ da liễu NGAY!"
-            
-            return ImageAnalysisResponse(
-                skin_analysis=skin_analysis,
-                product_recommendation=product_recommendation,
-                severity_warning=severity_warning,
-                response_time=round(elapsed_time, 2),
-                session_id=session_id,
-                timestamp=datetime.now().isoformat()
-            )
-            
-        finally:
-            if temp_image_path.exists():
-                temp_image_path.unlink()
+        # Get recommendation
+        product_recommendation = state.rag_chain.invoke(rag_query)
         
-    except HTTPException:
-        raise
+        return ImageAnalysisResponse(
+            skin_analysis=skin_analysis,
+            product_recommendation=product_recommendation,
+            severity_warning="⚠️ SEVERE: Please consult a dermatologist immediately!" if is_severe else None,
+            response_time=round(time.time() - start_time, 2),
+            timestamp=datetime.now().isoformat()
+        )
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.post("/analyze-image-base64", response_model=ImageAnalysisResponse)
 async def analyze_image_base64_endpoint(request: ImageAnalysisRequest):
     """
-    Analyze skin image from base64 string
+    Analyze skin image from base64 - STATELESS
     
     - **image_base64**: Base64 encoded image
-    - **additional_text**: Additional text query (optional)
-    - **session_id**: Session ID (optional)
+    - **additional_text**: Additional query text
     """
-    if rag_chain is None:
-        raise HTTPException(status_code=503, detail="RAG chain chưa được khởi tạo.")
+    if state.rag_chain is None:
+        raise HTTPException(status_code=503, detail="RAG chain not initialized")
     
     try:
         start_time = time.time()
         
-        image_bytes = base64.b64decode(request.image_base64)
+        # Analyze using base64 directly (no temp file)
+        skin_analysis = analyze_skin_image(request.image_base64)
+        if not skin_analysis:
+            raise HTTPException(status_code=400, detail="Cannot analyze image")
         
-        temp_dir = Path("temp_uploads")
-        temp_dir.mkdir(exist_ok=True)
-        temp_image_path = temp_dir / f"{int(time.time() * 1000)}.jpg"
+        is_severe = check_severity(skin_analysis)
+        rag_query = build_image_analysis_query(skin_analysis, request.additional_text, is_severe)
+        product_recommendation = state.rag_chain.invoke(rag_query)
         
-        with open(temp_image_path, "wb") as f:
-            f.write(image_bytes)
-        
-        try:
-            skin_analysis = analyze_skin_image(str(temp_image_path))
-            
-            if not skin_analysis:
-                raise HTTPException(status_code=400, detail="Không thể phân tích ảnh")
-            
-            is_very_severe = 'RẤT NẶNG' in skin_analysis.upper()
-            
-            if request.additional_text:
-                rag_query = f"""Tình trạng da: {skin_analysis}
-Yêu cầu: {request.additional_text}
-Tư vấn sản phẩm phù hợp."""
-            else:
-                rag_query = f"""Tình trạng da: {skin_analysis}
-Tư vấn sản phẩm phù hợp."""
-            
-            product_recommendation = rag_chain.invoke(rag_query)
-            
-            elapsed_time = time.time() - start_time
-            
-            return ImageAnalysisResponse(
-                skin_analysis=skin_analysis,
-                product_recommendation=product_recommendation,
-                severity_warning="⚠️ CẦN GẶP BÁC SĨ DA LIỄU!" if is_very_severe else None,
-                response_time=round(elapsed_time, 2),
-                session_id=request.session_id or f"session_{int(time.time() * 1000)}",
-                timestamp=datetime.now().isoformat()
-            )
-            
-        finally:
-            if temp_image_path.exists():
-                temp_image_path.unlink()
+        return ImageAnalysisResponse(
+            skin_analysis=skin_analysis,
+            product_recommendation=product_recommendation,
+            severity_warning="⚠️ SEVERE: Please consult a dermatologist!" if is_severe else None,
+            response_time=round(time.time() - start_time, 2),
+            timestamp=datetime.now().isoformat()
+        )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi: {str(e)}")
-
-@app.delete("/session/{session_id}")
-async def clear_session(session_id: str):
-    """Delete conversation context for a session"""
-    if session_id in conversation_sessions:
-        del conversation_sessions[session_id]
-        return {"message": f"Đã xóa session {session_id}", "status": "success"}
-    else:
-        raise HTTPException(status_code=404, detail="Session không tồn tại")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 # =============================================================================
-# API ENDPOINTS - Skin Disease Classification
+# CLASSIFICATION ENDPOINTS
 # =============================================================================
 @app.post("/api/classification-disease")
 async def classify_skin_disease(file: UploadFile = File(...)) -> Dict:
-    """
-    Classify skin disease from an uploaded image
-    
-    Returns: JSON with predicted class and confidence scores
-    """
-    if classification_model is None:
-        raise HTTPException(status_code=503, detail="Classification model not loaded")
+    """Classify skin disease"""
+    if state.classification_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
     
     if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
+        raise HTTPException(status_code=400, detail="Invalid file type")
     
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-        input_tensor = classify_transform(image).unsqueeze(0).to(device)
+        input_tensor = IMAGE_TRANSFORMS['classification'](image).unsqueeze(0).to(device)
         
         with torch.no_grad():
-            outputs = classification_model(input_tensor)
+            outputs = state.classification_model(input_tensor)
             probabilities = torch.nn.functional.softmax(outputs, dim=1)
             confidence, predicted = torch.max(probabilities, 1)
-            
             all_probs = probabilities[0].cpu().numpy()
-            
-        result = {
+        
+        return {
             "predicted_class": SKIN_CLASSES[predicted.item()],
             "confidence": float(confidence.item()),
-            "all_predictions": {
-                SKIN_CLASSES[i]: float(all_probs[i]) 
-                for i in range(len(SKIN_CLASSES))
-            }
+            "all_predictions": {SKIN_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CLASSES))}
         }
-        
-        return result
-        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/classification-condition")
 async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
-    """
-    Classify skin condition (Dry, Normal, Oily)
-    
-    Returns: JSON with predicted condition and confidence scores
-    """
-    if skin_condition_model is None:
-        raise HTTPException(status_code=503, detail="Skin condition model not loaded")
+    """Classify skin condition"""
+    if state.skin_condition_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
     
     if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
+        raise HTTPException(status_code=400, detail="Invalid file type")
     
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-        input_tensor = condition_transform(image).unsqueeze(0).to(device)
+        input_tensor = IMAGE_TRANSFORMS['condition'](image).unsqueeze(0).to(device)
         
         with torch.no_grad():
-            outputs = skin_condition_model(input_tensor)
+            outputs = state.skin_condition_model(input_tensor)
             probabilities = torch.nn.functional.softmax(outputs, dim=1)
             confidence, predicted = torch.max(probabilities, 1)
-            
             all_probs = probabilities[0].cpu().numpy()
-            
-        result = {
+        
+        return {
             "predicted_condition": SKIN_CONDITION_CLASSES[predicted.item()],
             "confidence": float(confidence.item()),
-            "all_predictions": {
-                SKIN_CONDITION_CLASSES[i]: float(all_probs[i]) 
-                for i in range(len(SKIN_CONDITION_CLASSES))
-            }
+            "all_predictions": {SKIN_CONDITION_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CONDITION_CLASSES))}
         }
-        
-        return result
-        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/segmentation-disease")
 async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
-    """
-    Generate segmentation mask for skin lesion
-    
-    Returns: JSON with base64 encoded mask image
-    """
-    if segmentation_model is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Segmentation model not loaded"
-        )
+    """Segment skin lesion"""
+    if state.segmentation_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
     
     if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
+        raise HTTPException(status_code=400, detail="Invalid file type")
     
     try:
         contents = await file.read()
@@ -692,20 +499,14 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
         original_size = image.size
         image_np = np.array(image)
         
-        segmentation_model.set_image(image_np)
+        state.segmentation_model.set_image(image_np)
         
         with torch.no_grad():
-            masks, scores, logits = segmentation_model.predict(
-                point_coords=None,
-                point_labels=None,
-                box=None,
-                multimask_output=False,
+            masks, scores, _ = state.segmentation_model.predict(
+                point_coords=None, point_labels=None, box=None, multimask_output=False
             )
         
-        if len(masks) > 0:
-            mask = masks[0]
-        else:
-            mask = np.zeros((image_np.shape[0], image_np.shape[1]), dtype=np.uint8)
+        mask = masks[0] if len(masks) > 0 else np.zeros(image_np.shape[:2], dtype=np.uint8)
         
         if mask.dtype == bool:
             mask = mask.astype(np.uint8) * 255
@@ -713,7 +514,6 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
             mask = (mask * 255).astype(np.uint8)
         
         mask_image = Image.fromarray(mask)
-        
         if mask_image.size != original_size:
             mask_image = mask_image.resize(original_size, Image.NEAREST)
         
@@ -727,20 +527,12 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
             "original_size": original_size,
             "confidence": float(scores[0]) if len(scores) > 0 else 0.0
         }
-        
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =============================================================================
 # RUN SERVER
 # =============================================================================
 if __name__ == "__main__":
     import uvicorn
-    
-    print("\n🚀 Khởi động Unified AI Dermatology & Cosmetic API Server...")
-    print("📚 API Documentation: http://localhost:8000/docs")
-    print("🔗 Alternative Docs: http://localhost:8000/redoc\n")
-    
     uvicorn.run(app, host="0.0.0.0", port=8000)
