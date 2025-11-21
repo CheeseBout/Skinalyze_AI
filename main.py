@@ -20,6 +20,7 @@ from typing import Dict, Optional, List
 import os
 import time
 from datetime import datetime
+import mediapipe as mp
 
 from RAG_cosmetic import (
     setup_api_key,
@@ -62,7 +63,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_PATHS = {
-    'classification': os.path.join(BASE_DIR, "models/resnet50_skin_disease_complete.pth"),
+    'classification': os.path.join(BASE_DIR, "models/efficientnet_b0_complete.pt"),
     'segmentation': os.path.join(BASE_DIR, "models/medsam2_dermatology_best_aug2.pth"),
     'skin_condition': os.path.join(BASE_DIR, "models/efficient-net-skin-conditions-classifier.pth")
 }
@@ -88,6 +89,7 @@ class AppState:
     classification_model = None
     segmentation_model = None
     skin_condition_model = None
+    face_detector = None
 
 state = AppState()
 
@@ -127,23 +129,32 @@ class HealthResponse(BaseModel):
 # MODEL LOADING
 # =============================================================================
 def load_classification_model():
-    """Load ResNet50 classification model"""
     model_path = MODEL_PATHS['classification']
     if not os.path.exists(model_path):
         print(f"⚠️  Classification model not found")
         return None
     
     try:
-        model = models.resnet50(weights=None)
-        num_features = model.fc.in_features
-        
-        model.fc = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(num_features, 512),
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Dropout(0.5),
-            nn.Linear(512, len(SKIN_CLASSES))
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
+        model = models.efficientnet_b0(weights=None)
+        num_features = model.classifier[1].in_features
+        linear1_out = state_dict['classifier.1.weight'].shape[0]
+        linear2_out = state_dict['classifier.5.weight'].shape[0]
+        linear3_out = state_dict['classifier.9.weight'].shape[0]
+
+
+        model.classifier = nn.Sequential(
+            nn.Dropout(p=0.2, inplace=True),           # 0
+            nn.Linear(1280, linear1_out),              # 1
+            nn.ReLU(inplace=True),                     # 2
+            nn.BatchNorm1d(linear1_out),               # 3
+            nn.Dropout(p=0.5),                         # 4
+            nn.Linear(linear1_out, linear2_out),       # 5
+            nn.ReLU(inplace=True),                     # 6
+            nn.BatchNorm1d(linear2_out),               # 7
+            nn.Dropout(p=0.5),                         # 8
+            nn.Linear(linear2_out, linear3_out)        # 9
         )
         
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -240,6 +251,18 @@ def load_segmentation_model():
         print(f"❌ Error loading segmentation model: {e}")
         return None
 
+def load_face_detection_model():
+    """Load Mediapipe Face Detection model"""
+    try:
+        mp_face_detection = mp.solutions.face_detection
+        # model_selection=1 < 2 meters, model_selection=0 >= 2 meters
+        detector = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+        print("✅ Face detection model loaded")
+        return detector
+    except Exception as e:
+        print(f"❌ Error loading face detection model: {e}")
+        return None
+
 # =============================================================================
 # STARTUP
 # =============================================================================
@@ -254,7 +277,8 @@ async def startup_event():
     state.classification_model = load_classification_model()
     state.segmentation_model = load_segmentation_model()
     state.skin_condition_model = load_skin_condition_model()
-    
+    state.face_detector = load_face_detection_model()
+
     # Initialize RAG
     try:
         setup_api_key()
@@ -436,7 +460,7 @@ async def classify_skin_disease(file: UploadFile = File(...)) -> Dict:
     
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type")
-    
+
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
@@ -458,16 +482,41 @@ async def classify_skin_disease(file: UploadFile = File(...)) -> Dict:
 
 @app.post("/api/classification-condition")
 async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
-    """Classify skin condition"""
-    if state.skin_condition_model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    """Classify skin condition (Dry/Normal/Oily) with Face Detection Check"""
     
+    # 1. Kiểm tra xem model đã load chưa
+    if state.skin_condition_model is None:
+        raise HTTPException(status_code=503, detail="Skin condition model not loaded")
+    
+    # 2. Kiểm tra định dạng file
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type")
     
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        
+        # =====================================================================
+        # BƯỚC MỚI: KIỂM TRA KHUÔN MẶT (FACE DETECTION)
+        # =====================================================================
+        if state.face_detector:
+            # MediaPipe yêu cầu ảnh dạng Numpy Array
+            image_np = np.array(image)
+            
+            # Chạy nhận diện
+            face_results = state.face_detector.process(image_np)
+            
+            # Nếu KHÔNG tìm thấy khuôn mặt -> Báo lỗi ngay, không phân tích tiếp
+            if not face_results.detections:
+                 raise HTTPException(
+                     status_code=400, 
+                     detail="Không tìm thấy khuôn mặt. Vui lòng chụp ảnh khuôn mặt rõ ràng để phân tích da."
+                 )
+        else:
+            print("⚠️ Face detector skipped (not loaded)")
+        # =====================================================================
+
+        # 3. Nếu có mặt, tiếp tục quy trình phân loại cũ
         input_tensor = IMAGE_TRANSFORMS['condition'](image).unsqueeze(0).to(device)
         
         with torch.no_grad():
@@ -479,9 +528,14 @@ async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
         return {
             "predicted_condition": SKIN_CONDITION_CLASSES[predicted.item()],
             "confidence": float(confidence.item()),
-            "all_predictions": {SKIN_CONDITION_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CONDITION_CLASSES))}
+            "all_predictions": {SKIN_CONDITION_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CONDITION_CLASSES))},
+            "face_detected": True # Xác nhận đã check thấy mặt
         }
+        
+    except HTTPException as he:
+        raise he 
     except Exception as e:
+        print(f"Error processing: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/segmentation-disease")
@@ -513,6 +567,32 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
         elif mask.max() <= 1:
             mask = (mask * 255).astype(np.uint8)
         
+        cropped_base64 = None
+
+        if mask.max() > 0:
+            y_indices, x_indices = np.where(mask > 0)
+            y_min, y_max = y_indices.min(), y_indices.max()
+            x_min, x_max = x_indices.min(), x_indices.max()
+
+            img_rgba = image.convert("RGBA")
+            mask_pil_alpha = Image.fromarray(mask).convert("L")
+            img_rgba.putalpha(mask_pil_alpha)
+            cropped_image = img_rgba.crop((x_min, y_min, x_max + 1, y_max + 1))
+            buffer_crop = io.BytesIO()
+            cropped_image.save(buffer_crop, format="PNG")
+            cropped_base64 = base64.b64encode(buffer_crop.getvalue()).decode("utf-8")
+
+        black_bg = Image.new("RGB", original_size, (0, 0, 0))
+        mask_pil = Image.fromarray(mask).convert("L")
+        
+        if mask_pil.size != original_size:
+            mask_pil = mask_pil.resize(original_size, Image.NEAREST)
+
+        full_image_on_black = Image.composite(image, black_bg, mask_pil)
+        buffer_black_bg = io.BytesIO()
+        full_image_on_black.save(buffer_black_bg, format="JPEG", quality=90)
+        black_bg_base64 = base64.b64encode(buffer_black_bg.getvalue()).decode("utf-8")
+
         mask_image = Image.fromarray(mask)
         if mask_image.size != original_size:
             mask_image = mask_image.resize(original_size, Image.NEAREST)
@@ -523,6 +603,7 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
         
         return {
             "mask": mask_base64,
+            "lesion_on_black": black_bg_base64,
             "format": "base64_png",
             "original_size": original_size,
             "confidence": float(scores[0]) if len(scores) > 0 else 0.0
@@ -530,6 +611,25 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/face-detection")
+async def face_detection(file: UploadFile = File(...)) -> bool:
+    if state.face_detector is None:
+        print("⚠️  Face detection model not loaded")
+        return True
+    try:
+        content = await file.read()
+        image = Image.open(io.BytesIO(content)).convert("RGB")
+        image_np = np.array(image)
+
+        results = state.face_detector.process(image_np)
+
+        if results.detections:
+            return {"has_face": True}
+        return {"has_face": False}
+    except Exception as e:
+        print(f"❌ Error during face detection: {e}")
+        return {"has_face": False}
+    
 # =============================================================================
 # RUN SERVER
 # =============================================================================
