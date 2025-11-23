@@ -19,9 +19,11 @@ import numpy as np
 from typing import Dict, Optional, List
 import os
 import time
+import json
 from datetime import datetime
 import mediapipe as mp
 
+# Ensure RAG_cosmetic.py is in the same directory
 from RAG_cosmetic import (
     setup_api_key,
     load_or_create_vectorstore,
@@ -37,7 +39,7 @@ from RAG_cosmetic import (
 app = FastAPI(
     title="AI Dermatology & Cosmetic Consultant API",
     description="Stateless API for skin disease classification, segmentation, and cosmetic consultation",
-    version="3.0.0"
+    version="3.3.0"
 )
 
 app.add_middleware(
@@ -98,7 +100,7 @@ state = AppState()
 # =============================================================================
 class ChatRequest(BaseModel):
     question: str
-    conversation_history: Optional[List[Dict[str, str]]] = None  # [{"role": "user|ai", "content": "..."}]
+    conversation_history: Optional[List[Dict[str, str]]] = None 
 
 class ChatResponse(BaseModel):
     answer: str
@@ -125,6 +127,11 @@ class HealthResponse(BaseModel):
     skin_condition_model_status: str
     timestamp: str
 
+class VLMAnalysisResponse(BaseModel):
+    skin_analysis: str
+    response_time: float
+    timestamp: str
+
 # =============================================================================
 # MODEL LOADING
 # =============================================================================
@@ -138,27 +145,24 @@ def load_classification_model():
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
         model = models.efficientnet_b0(weights=None)
-        num_features = model.classifier[1].in_features
+        
+        # Reconstruct classifier architecture
         linear1_out = state_dict['classifier.1.weight'].shape[0]
         linear2_out = state_dict['classifier.5.weight'].shape[0]
         linear3_out = state_dict['classifier.9.weight'].shape[0]
 
-
         model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),           # 0
-            nn.Linear(1280, linear1_out),              # 1
-            nn.ReLU(inplace=True),                     # 2
-            nn.BatchNorm1d(linear1_out),               # 3
-            nn.Dropout(p=0.5),                         # 4
-            nn.Linear(linear1_out, linear2_out),       # 5
-            nn.ReLU(inplace=True),                     # 6
-            nn.BatchNorm1d(linear2_out),               # 7
-            nn.Dropout(p=0.5),                         # 8
-            nn.Linear(linear2_out, linear3_out)        # 9
+            nn.Dropout(p=0.2, inplace=True),
+            nn.Linear(1280, linear1_out),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(linear1_out),
+            nn.Dropout(p=0.5),
+            nn.Linear(linear1_out, linear2_out),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(linear2_out),
+            nn.Dropout(p=0.5),
+            nn.Linear(linear2_out, linear3_out)
         )
-        
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
         
         model.load_state_dict(state_dict)
         model.to(device)
@@ -255,7 +259,6 @@ def load_face_detection_model():
     """Load Mediapipe Face Detection model"""
     try:
         mp_face_detection = mp.solutions.face_detection
-        # model_selection=1 < 2 meters, model_selection=0 >= 2 meters
         detector = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
         print("✅ Face detection model loaded")
         return detector
@@ -273,13 +276,11 @@ async def startup_event():
     print("🚀 STARTING AI DERMATOLOGY & COSMETIC API SERVER")
     print("=" * 80)
     
-    # Load models
     state.classification_model = load_classification_model()
     state.segmentation_model = load_segmentation_model()
     state.skin_condition_model = load_skin_condition_model()
     state.face_detector = load_face_detection_model()
 
-    # Initialize RAG
     try:
         setup_api_key()
         db, embeddings = load_or_create_vectorstore()
@@ -303,7 +304,6 @@ async def startup_event():
 @app.get("/", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint"""
     return HealthResponse(
         status="healthy" if state.rag_chain else "degraded",
         message="AI Dermatology & Cosmetic API",
@@ -315,15 +315,16 @@ async def health_check():
     )
 
 # =============================================================================
-# RAG CHATBOT ENDPOINTS (STATELESS)
+# RAG CHATBOT ENDPOINTS
 # =============================================================================
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(
+    question: str = Form(...),
+    conversation_history: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
     """
-    Stateless chat endpoint - NestJS handles session management
-    
-    - **question**: User's question
-    - **conversation_history**: Optional conversation context from NestJS DB
+    Stateless chat endpoint supporting Text + Optional Image (VLM).
     """
     if state.rag_chain is None:
         raise HTTPException(status_code=503, detail="RAG chain not initialized")
@@ -331,15 +332,40 @@ async def chat_endpoint(request: ChatRequest):
     try:
         start_time = time.time()
         
-        # Build query with history if provided
-        query = request.question
-        if request.conversation_history:
-            # Convert NestJS format to context
+        # 1. Parse conversation history from JSON string
+        history_list = []
+        if conversation_history:
+            try:
+                history_list = json.loads(conversation_history)
+            except json.JSONDecodeError:
+                print("⚠️ Failed to parse conversation_history JSON")
+                history_list = []
+
+        # 2. VLM Analysis (If image is provided)
+        vlm_context_str = ""
+        if image:
+            if not image.content_type.startswith("image/"):
+                raise HTTPException(status_code=400, detail="Uploaded file is not an image")
+            
+            image_bytes = await image.read()
+            skin_analysis = analyze_skin_image(image_bytes, note=question)
+            
+            if skin_analysis:
+                vlm_context_str = f"""
+\n[THÔNG TIN TỪ ẢNH NGƯỜI DÙNG GỬI KÈM]:
+Hệ thống đã phân tích ảnh da của người dùng với kết quả sau:
+{skin_analysis}
+-----------------------------------
+"""
+        
+        # 3. Build Context from History
+        context_str = ""
+        if history_list:
             context_pairs = []
-            for i in range(0, len(request.conversation_history) - 1, 2):
-                if i + 1 < len(request.conversation_history):
-                    user_msg = request.conversation_history[i]
-                    ai_msg = request.conversation_history[i + 1]
+            for i in range(0, len(history_list) - 1, 2):
+                if i + 1 < len(history_list):
+                    user_msg = history_list[i]
+                    ai_msg = history_list[i + 1]
                     if user_msg.get('role') == 'user' and ai_msg.get('role') == 'ai':
                         context_pairs.append((
                             user_msg.get('content', ''),
@@ -347,21 +373,21 @@ async def chat_endpoint(request: ChatRequest):
                         ))
             
             if context_pairs:
-                recent = context_pairs[-3:]  # Last 3 exchanges
-                context_str = "\n".join([
+                recent = context_pairs[-3:]
+                context_str = "LỊCH SỬ HỘI THOẠI TRƯỚC ĐÓ:\n" + "\n".join([
                     f"User: {ctx[0]}\nAI: {ctx[1][:200]}..." 
                     for ctx in recent
-                ])
-                
-                query = f"""CONVERSATION HISTORY:
-{context_str}
+                ]) + "\n"
 
-CURRENT QUESTION: {request.question}
+        # 4. Construct Final Prompt
+        full_query = f"""{context_str}
+{vlm_context_str}
 
-Answer based on history and current question."""
+CÂU HỎI HIỆN TẠI CỦA NGƯỜI DÙNG: {question}
+
+Yêu cầu: Hãy trả lời câu hỏi của người dùng dựa trên thông tin sản phẩm có trong database. Nếu có thông tin từ ảnh, hãy sử dụng nó để tư vấn chính xác hơn."""
         
-        # Get response
-        response = state.rag_chain.invoke(query)
+        response = state.rag_chain.invoke(full_query)
         
         return ChatResponse(
             answer=response,
@@ -370,6 +396,7 @@ Answer based on history and current question."""
         )
         
     except Exception as e:
+        print(f"Chat Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.post("/analyze-image", response_model=ImageAnalysisResponse)
@@ -377,31 +404,20 @@ async def analyze_image_endpoint(
     image: UploadFile = File(...),
     additional_text: Optional[str] = Form(None)
 ):
-    """
-    Analyze skin image - STATELESS (no file storage)
-    
-    - **image**: Skin image file
-    - **additional_text**: Additional query text
-    """
     if state.rag_chain is None:
         raise HTTPException(status_code=503, detail="RAG chain not initialized")
     
     try:
         start_time = time.time()
-        
-        # Read image directly into memory (no temp file)
         image_bytes = await image.read()
         
-        # Analyze using bytes directly
         skin_analysis = analyze_skin_image(image_bytes)
         if not skin_analysis:
             raise HTTPException(status_code=400, detail="Cannot analyze image")
         
-        # Check severity and build query
         is_severe = check_severity(skin_analysis)
-        rag_query = build_image_analysis_query(skin_analysis, additional_text, is_severe)
+        rag_query = build_image_analysis_query(skin_analysis, additional_text)
         
-        # Get recommendation
         product_recommendation = state.rag_chain.invoke(rag_query)
         
         return ImageAnalysisResponse(
@@ -417,25 +433,17 @@ async def analyze_image_endpoint(
 
 @app.post("/analyze-image-base64", response_model=ImageAnalysisResponse)
 async def analyze_image_base64_endpoint(request: ImageAnalysisRequest):
-    """
-    Analyze skin image from base64 - STATELESS
-    
-    - **image_base64**: Base64 encoded image
-    - **additional_text**: Additional query text
-    """
     if state.rag_chain is None:
         raise HTTPException(status_code=503, detail="RAG chain not initialized")
     
     try:
         start_time = time.time()
-        
-        # Analyze using base64 directly (no temp file)
         skin_analysis = analyze_skin_image(request.image_base64)
         if not skin_analysis:
             raise HTTPException(status_code=400, detail="Cannot analyze image")
         
         is_severe = check_severity(skin_analysis)
-        rag_query = build_image_analysis_query(skin_analysis, request.additional_text, is_severe)
+        rag_query = build_image_analysis_query(skin_analysis, request.additional_text)
         product_recommendation = state.rag_chain.invoke(rag_query)
         
         return ImageAnalysisResponse(
@@ -450,11 +458,17 @@ async def analyze_image_base64_endpoint(request: ImageAnalysisRequest):
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 # =============================================================================
-# CLASSIFICATION ENDPOINTS
+# CLASSIFICATION & SEGMENTATION ENDPOINTS
 # =============================================================================
 @app.post("/api/classification-disease")
-async def classify_skin_disease(file: UploadFile = File(...)) -> Dict:
-    """Classify skin disease"""
+async def classify_skin_disease(
+    file: UploadFile = File(...),
+    notes: Optional[str] = Form(None)
+) -> Dict:
+    """
+    Classify skin disease using EfficientNet.
+    Checks for face visibility ONLY if notes == 'facial'.
+    """
     if state.classification_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
@@ -464,6 +478,25 @@ async def classify_skin_disease(file: UploadFile = File(...)) -> Dict:
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
+
+        # =====================================================================
+        # CONDITIONAL FACE DETECTION CHECK
+        # =====================================================================
+        if notes == 'facial':
+            if state.face_detector:
+                image_np = np.array(image)
+                results = state.face_detector.process(image_np)
+                
+                if not results.detections:
+                     # Raising 400 here stops NestJS from saving the record
+                     raise HTTPException(
+                         status_code=400, 
+                         detail="No face detected. Please upload a clear image of a face for facial analysis."
+                     )
+            else:
+                print("⚠️ Face detector skipped (not loaded)")
+        # =====================================================================
+
         input_tensor = IMAGE_TRANSFORMS['classification'](image).unsqueeze(0).to(device)
         
         with torch.no_grad():
@@ -477,18 +510,19 @@ async def classify_skin_disease(file: UploadFile = File(...)) -> Dict:
             "confidence": float(confidence.item()),
             "all_predictions": {SKIN_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CLASSES))}
         }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/classification-condition")
 async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
-    """Classify skin condition (Dry/Normal/Oily) with Face Detection Check"""
-    
-    # 1. Kiểm tra xem model đã load chưa
+    """
+    Classify skin condition (Dry/Normal/Oily) - Always checks for face.
+    """
     if state.skin_condition_model is None:
         raise HTTPException(status_code=503, detail="Skin condition model not loaded")
     
-    # 2. Kiểm tra định dạng file
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type")
     
@@ -496,17 +530,10 @@ async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        # =====================================================================
-        # BƯỚC MỚI: KIỂM TRA KHUÔN MẶT (FACE DETECTION)
-        # =====================================================================
         if state.face_detector:
-            # MediaPipe yêu cầu ảnh dạng Numpy Array
             image_np = np.array(image)
-            
-            # Chạy nhận diện
             face_results = state.face_detector.process(image_np)
             
-            # Nếu KHÔNG tìm thấy khuôn mặt -> Báo lỗi ngay, không phân tích tiếp
             if not face_results.detections:
                  raise HTTPException(
                      status_code=400, 
@@ -514,9 +541,7 @@ async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
                  )
         else:
             print("⚠️ Face detector skipped (not loaded)")
-        # =====================================================================
 
-        # 3. Nếu có mặt, tiếp tục quy trình phân loại cũ
         input_tensor = IMAGE_TRANSFORMS['condition'](image).unsqueeze(0).to(device)
         
         with torch.no_grad():
@@ -529,7 +554,7 @@ async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
             "predicted_condition": SKIN_CONDITION_CLASSES[predicted.item()],
             "confidence": float(confidence.item()),
             "all_predictions": {SKIN_CONDITION_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CONDITION_CLASSES))},
-            "face_detected": True # Xác nhận đã check thấy mặt
+            "face_detected": True
         }
         
     except HTTPException as he:
@@ -540,7 +565,6 @@ async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
 
 @app.post("/api/segmentation-disease")
 async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
-    """Segment skin lesion"""
     if state.segmentation_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
@@ -567,21 +591,6 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
         elif mask.max() <= 1:
             mask = (mask * 255).astype(np.uint8)
         
-        cropped_base64 = None
-
-        if mask.max() > 0:
-            y_indices, x_indices = np.where(mask > 0)
-            y_min, y_max = y_indices.min(), y_indices.max()
-            x_min, x_max = x_indices.min(), x_indices.max()
-
-            img_rgba = image.convert("RGBA")
-            mask_pil_alpha = Image.fromarray(mask).convert("L")
-            img_rgba.putalpha(mask_pil_alpha)
-            cropped_image = img_rgba.crop((x_min, y_min, x_max + 1, y_max + 1))
-            buffer_crop = io.BytesIO()
-            cropped_image.save(buffer_crop, format="PNG")
-            cropped_base64 = base64.b64encode(buffer_crop.getvalue()).decode("utf-8")
-
         black_bg = Image.new("RGB", original_size, (0, 0, 0))
         mask_pil = Image.fromarray(mask).convert("L")
         
@@ -611,11 +620,18 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# =============================================================================
+# FACE DETECTION ENDPOINT (FIXED RETURN TYPE)
+# =============================================================================
 @app.post("/api/face-detection")
-async def face_detection(file: UploadFile = File(...)) -> bool:
+async def face_detection(file: UploadFile = File(...)) -> Dict[str, bool]:
+    """
+    Checks if the image contains a face.
+    Returns: {"has_face": boolean}
+    """
     if state.face_detector is None:
         print("⚠️  Face detection model not loaded")
-        return True
+        return {"has_face": True} # Fail open if model missing
     try:
         content = await file.read()
         image = Image.open(io.BytesIO(content)).convert("RGB")
@@ -629,7 +645,32 @@ async def face_detection(file: UploadFile = File(...)) -> bool:
     except Exception as e:
         print(f"❌ Error during face detection: {e}")
         return {"has_face": False}
+
+@app.post("/api/analyze-skin-image-vlm", response_model=VLMAnalysisResponse)
+async def analyze_skin_image_vlm_endpoint(file: UploadFile = File(...), note: Optional[str] = Form(None)):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload an image.")
+
+    try: 
+        start_time = time.time()
+        image_bytes = await file.read()
+        skin_analysis = analyze_skin_image(image_bytes, note)
+        
+        if not skin_analysis:
+            raise HTTPException(status_code=500, detail="VLM failed to analyze the image. Please try again.")
+        
+        return VLMAnalysisResponse(
+            skin_analysis=skin_analysis,
+            response_time=round(time.time() - start_time, 2),
+            timestamp=datetime.now().isoformat()
+        )
     
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"❌ Error in VLM endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
 # =============================================================================
 # RUN SERVER
 # =============================================================================
