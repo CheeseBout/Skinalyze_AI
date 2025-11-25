@@ -22,7 +22,9 @@ import time
 import json
 from datetime import datetime
 import mediapipe as mp
+from dotenv import load_dotenv
 
+load_dotenv()
 # Ensure RAG_cosmetic.py is in the same directory
 from RAG_cosmetic import (
     setup_api_key,

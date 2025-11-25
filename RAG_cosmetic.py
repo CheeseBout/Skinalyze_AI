@@ -17,7 +17,7 @@ import google.generativeai as genai
 import base64
 import io
 import time
-
+from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -90,16 +90,18 @@ SKIN_CONDITION_TO_SKIN_TYPE = {
 # =============================================================================
 def setup_api_key():
     """Setup Google API Key"""
-    if "GOOGLE_API_KEY" not in os.environ:
-        print("\n🔑 Cần Google API Key để sử dụng Gemini")
-        # Fallback key (nên dùng biến môi trường khi deploy thực tế)
-        api_key = "AIzaSyDLKLqpBHxf3xiutoYk5MjMzTywvju0Dx0" 
-        os.environ["GOOGLE_API_KEY"] = api_key
-        print("✅ Đã thiết lập API Key!\n")
-    else:
-        print("✅ API Key đã được cấu hình sẵn!\n")
+    # Attempt to get the key from the environment
+    api_key = os.getenv("GOOGLE_API_KEY")
+
+    if not api_key:
+        print("\n❌ CRITICAL ERROR: GOOGLE_API_KEY not found in environment variables.")
+        print("Please create a .env file and add GOOGLE_API_KEY=your_new_key")
+        # DO NOT fallback to a hardcoded key. It is a security risk.
+        raise ValueError("GOOGLE_API_KEY is missing.")
     
-    genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+    # Configure Gemini
+    genai.configure(api_key=api_key)
+    print("✅ API Key configured successfully from environment!\n")
 
 def extract_product_name(chunk_text):
     """Trích xuất tên sản phẩm từ chunk text"""
