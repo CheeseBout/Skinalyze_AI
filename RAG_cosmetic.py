@@ -54,7 +54,6 @@ SKIN_CONDITION_TO_SKIN_TYPE = {
     "dày sừng": ["Khô", "Thường"],
     "da dày sừng": ["Khô", "Thường"],
     
-    "drug eruption": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],  # Phát ban thuốc
     "phát ban thuốc": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],
     "phát ban do thuốc": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],
     

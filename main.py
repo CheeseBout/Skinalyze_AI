@@ -8,6 +8,7 @@ Stateless API for NestJS Backend Integration
 # =============================================================================
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import torch
 import torch.nn as nn
@@ -25,6 +26,7 @@ import mediapipe as mp
 from dotenv import load_dotenv
 
 load_dotenv()
+
 # Ensure RAG_cosmetic.py is in the same directory
 from RAG_cosmetic import (
     setup_api_key,
@@ -32,33 +34,25 @@ from RAG_cosmetic import (
     setup_rag_chain,
     analyze_skin_image,
     check_severity,
-    build_image_analysis_query
-)
-
-# =============================================================================
-# FASTAPI APP
-# =============================================================================
-app = FastAPI(
-    title="AI Dermatology & Cosmetic Consultant API",
-    description="Stateless API for skin disease classification, segmentation, and cosmetic consultation",
-    version="3.3.0"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    build_image_analysis_query,
+    detect_skin_condition_and_types
 )
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
+# UPDATED: Exactly 10 classes (Removed Drug_Eruption)
 SKIN_CLASSES = [
-    'Acne', 'Actinic_Keratosis', 'Drug_Eruption', 'Eczema', 'Normal', 
-    'Psoriasis', 'Rosacea', 'Seborrh_Keratoses', 'Sun_Sunlight_Damage', 
-    'Tinea', 'Warts'
+    'Acne', 
+    'Actinic_Keratosis', 
+    'Eczema', 
+    'Normal', 
+    'Psoriasis', 
+    'Rosacea', 
+    'Seborrh_Keratoses', 
+    'Sun_Sunlight_Damage', 
+    'Tinea', 
+    'Warts'
 ]
 
 SKIN_CONDITION_CLASSES = ['Dry', 'Normal', 'Oily']
@@ -98,79 +92,83 @@ class AppState:
 state = AppState()
 
 # =============================================================================
-# PYDANTIC MODELS
-# =============================================================================
-class ChatRequest(BaseModel):
-    question: str
-    conversation_history: Optional[List[Dict[str, str]]] = None 
-
-class ChatResponse(BaseModel):
-    answer: str
-    response_time: float
-    timestamp: str
-
-class ImageAnalysisRequest(BaseModel):
-    image_base64: str
-    additional_text: Optional[str] = None
-
-class ImageAnalysisResponse(BaseModel):
-    skin_analysis: str
-    product_recommendation: str
-    severity_warning: Optional[str] = None
-    response_time: float
-    timestamp: str
-
-class HealthResponse(BaseModel):
-    status: str
-    message: str
-    vectorstore_status: str
-    classification_model_status: str
-    segmentation_model_status: str
-    skin_condition_model_status: str
-    timestamp: str
-
-class VLMAnalysisResponse(BaseModel):
-    skin_analysis: str
-    response_time: float
-    timestamp: str
-
-# =============================================================================
 # MODEL LOADING
 # =============================================================================
 def load_classification_model():
+    """
+    Robust loader for EfficientNet-B0 classification model.
+    Matches the custom architecture:
+    Dropout -> Linear(512) -> BN -> ReLU -> Dropout -> Linear(256) -> BN -> ReLU -> Linear(10)
+    """
     model_path = MODEL_PATHS['classification']
     if not os.path.exists(model_path):
-        print(f"⚠️  Classification model not found")
+        print(f"⚠️  Classification model not found at {model_path}")
         return None
     
     try:
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        
+        # 1. If checkpoint is a full model object
+        if not isinstance(checkpoint, dict):
+            print("ℹ️  Checkpoint is a full model object.")
+            model = checkpoint
+            model.to(device)
+            model.eval()
+            return model
+
+        # 2. If checkpoint is a state dict
         state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
+        
+        # Initialize Base Model
         model = models.efficientnet_b0(weights=None)
         
-        # Reconstruct classifier architecture
-        linear1_out = state_dict['classifier.1.weight'].shape[0]
-        linear2_out = state_dict['classifier.5.weight'].shape[0]
-        linear3_out = state_dict['classifier.9.weight'].shape[0]
-
-        model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
-            nn.Linear(1280, linear1_out),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm1d(linear1_out),
-            nn.Dropout(p=0.5),
-            nn.Linear(linear1_out, linear2_out),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm1d(linear2_out),
-            nn.Dropout(p=0.5),
-            nn.Linear(linear2_out, linear3_out)
-        )
+        # Reconstruct Custom Classifier Head
+        # Based on your logic: 1280 -> 512 -> 256 -> 10
+        # Note: Dropout p values (0.3, 0.5 etc) don't affect weight loading, only training.
         
-        model.load_state_dict(state_dict)
-        model.to(device)
-        model.eval()
-        print(f"✅ Classification model loaded")
-        return model
+        try:
+            # Attempt to dynamically size based on saved weights if possible
+            # Usually: classifier.1.weight (512, 1280)
+            #          classifier.5.weight (256, 512)
+            #          classifier.8.weight (10, 256)
+            
+            linear1_in = 1280 # EfficientNet-B0 default
+            linear1_out = 512
+            linear2_out = 256
+            num_classes = len(SKIN_CLASSES) # Should be 10
+
+            if 'classifier.1.weight' in state_dict:
+                linear1_out = state_dict['classifier.1.weight'].shape[0]
+            if 'classifier.5.weight' in state_dict:
+                linear2_out = state_dict['classifier.5.weight'].shape[0]
+            if 'classifier.8.weight' in state_dict:
+                num_classes = state_dict['classifier.8.weight'].shape[0]
+
+            print(f"ℹ️  Reconstructing Classifier: {linear1_in} -> {linear1_out} -> {linear2_out} -> {num_classes}")
+
+            model.classifier = nn.Sequential(
+                nn.Dropout(p=0.3),                # 0
+                nn.Linear(linear1_in, linear1_out), # 1
+                nn.BatchNorm1d(linear1_out),      # 2
+                nn.ReLU(),                        # 3
+                nn.Dropout(p=0.5),                # 4
+                nn.Linear(linear1_out, linear2_out),# 5
+                nn.BatchNorm1d(linear2_out),      # 6
+                nn.ReLU(),                        # 7
+                nn.Linear(linear2_out, num_classes) # 8
+            )
+            
+            # Load weights
+            model.load_state_dict(state_dict, strict=False)
+            model.to(device)
+            model.eval()
+            print(f"✅ Classification model loaded successfully")
+            return model
+
+        except Exception as e:
+            print(f"⚠️ Error reconstructing head: {e}")
+            return None
+        
     except Exception as e:
         print(f"❌ Error loading classification model: {e}")
         return None
@@ -269,11 +267,11 @@ def load_face_detection_model():
         return None
 
 # =============================================================================
-# STARTUP
+# LIFESPAN (STARTUP/SHUTDOWN)
 # =============================================================================
-@app.on_event("startup")
-async def startup_event():
-    """Initialize models on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
     print("\n" + "=" * 80)
     print("🚀 STARTING AI DERMATOLOGY & COSMETIC API SERVER")
     print("=" * 80)
@@ -299,6 +297,65 @@ async def startup_event():
         
     except Exception as e:
         print(f"\n❌ Error initializing RAG: {e}\n")
+    
+    yield
+    
+    print("Shutting down models...")
+
+# =============================================================================
+# FASTAPI APP DEFINITION
+# =============================================================================
+app = FastAPI(
+    title="AI Dermatology & Cosmetic Consultant API",
+    description="Stateless API for skin disease classification, segmentation, and cosmetic consultation",
+    version="3.4.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
+class ChatRequest(BaseModel):
+    question: str
+    conversation_history: Optional[List[Dict[str, str]]] = None 
+
+class ChatResponse(BaseModel):
+    answer: str
+    response_time: float
+    timestamp: str
+
+class ImageAnalysisRequest(BaseModel):
+    image_base64: str
+    additional_text: Optional[str] = None
+
+class ImageAnalysisResponse(BaseModel):
+    skin_analysis: str
+    product_recommendation: str
+    severity_warning: Optional[str] = None
+    response_time: float
+    timestamp: str
+
+class HealthResponse(BaseModel):
+    status: str
+    message: str
+    vectorstore_status: str
+    classification_model_status: str
+    segmentation_model_status: str
+    skin_condition_model_status: str
+    timestamp: str
+
+class VLMAnalysisResponse(BaseModel):
+    skin_analysis: str
+    response_time: float
+    timestamp: str
 
 # =============================================================================
 # HEALTH CHECK
@@ -317,7 +374,7 @@ async def health_check():
     )
 
 # =============================================================================
-# RAG CHATBOT ENDPOINTS
+# RAG CHATBOT ENDPOINTS (UPDATED FOR MULTIMODAL + SMART PRODUCT SEARCH)
 # =============================================================================
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
@@ -326,7 +383,7 @@ async def chat_endpoint(
     image: Optional[UploadFile] = File(None)
 ):
     """
-    Stateless chat endpoint supporting Text + Optional Image (VLM).
+    Stateless chat endpoint supporting Text + Optional Image (VLM) + Intelligent Product Recommendations.
     """
     if state.rag_chain is None:
         raise HTTPException(status_code=503, detail="RAG chain not initialized")
@@ -334,7 +391,7 @@ async def chat_endpoint(
     try:
         start_time = time.time()
         
-        # 1. Parse conversation history from JSON string
+        # 1. Parse conversation history
         history_list = []
         if conversation_history:
             try:
@@ -360,7 +417,21 @@ Hệ thống đã phân tích ảnh da của người dùng với kết quả sa
 -----------------------------------
 """
         
-        # 3. Build Context from History
+        # 3. Intelligent Product Recommendation Logic
+        detected_condition, suitable_skin_types = detect_skin_condition_and_types(question)
+        
+        condition_context_str = ""
+        if detected_condition:
+            skin_types_str = ", ".join(suitable_skin_types) if suitable_skin_types else "mọi loại da"
+            condition_context_str = f"""
+[HỆ THỐNG PHÁT HIỆN VẤN ĐỀ DA]:
+- Vấn đề phát hiện: {detected_condition}
+- Loại da phù hợp để tư vấn sản phẩm: {skin_types_str}
+- ƯU TIÊN tìm kiếm và gợi ý các sản phẩm trong database dành cho: {skin_types_str}
+-----------------------------------
+"""
+
+        # 4. Build Context from History
         context_str = ""
         if history_list:
             context_pairs = []
@@ -381,14 +452,17 @@ Hệ thống đã phân tích ảnh da của người dùng với kết quả sa
                     for ctx in recent
                 ]) + "\n"
 
-        # 4. Construct Final Prompt
+        # 5. Construct Final Prompt for RAG
         full_query = f"""{context_str}
 {vlm_context_str}
+{condition_context_str}
 
 CÂU HỎI HIỆN TẠI CỦA NGƯỜI DÙNG: {question}
 
-Yêu cầu: Hãy trả lời câu hỏi của người dùng dựa trên thông tin sản phẩm có trong database. Nếu có thông tin từ ảnh, hãy sử dụng nó để tư vấn chính xác hơn."""
+Yêu cầu: Hãy trả lời câu hỏi của người dùng dựa trên thông tin sản phẩm có trong database. 
+Nếu có thông tin từ ảnh hoặc vấn đề da được phát hiện, hãy sử dụng nó để lọc và tư vấn sản phẩm chính xác hơn."""
         
+        # 6. Invoke RAG Chain
         response = state.rag_chain.invoke(full_query)
         
         return ChatResponse(
@@ -481,23 +555,19 @@ async def classify_skin_disease(
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-        # =====================================================================
-        # CONDITIONAL FACE DETECTION CHECK
-        # =====================================================================
+        # Conditional Face Detection
         if notes == 'facial':
             if state.face_detector:
                 image_np = np.array(image)
                 results = state.face_detector.process(image_np)
                 
                 if not results.detections:
-                     # Raising 400 here stops NestJS from saving the record
                      raise HTTPException(
                          status_code=400, 
                          detail="No face detected. Please upload a clear image of a face for facial analysis."
                      )
             else:
                 print("⚠️ Face detector skipped (not loaded)")
-        # =====================================================================
 
         input_tensor = IMAGE_TRANSFORMS['classification'](image).unsqueeze(0).to(device)
         
@@ -507,10 +577,19 @@ async def classify_skin_disease(
             confidence, predicted = torch.max(probabilities, 1)
             all_probs = probabilities[0].cpu().numpy()
         
+        # Safe Prediction Logic
+        pred_index = predicted.item()
+        if pred_index >= len(SKIN_CLASSES):
+            return {
+                "predicted_class": "Unknown",
+                "confidence": float(confidence.item()),
+                "note": "Model prediction index out of bounds for current class list"
+            }
+
         return {
-            "predicted_class": SKIN_CLASSES[predicted.item()],
+            "predicted_class": SKIN_CLASSES[pred_index],
             "confidence": float(confidence.item()),
-            "all_predictions": {SKIN_CLASSES[i]: float(all_probs[i]) for i in range(len(SKIN_CLASSES))}
+            "all_predictions": {SKIN_CLASSES[i]: float(all_probs[i]) for i in range(min(len(SKIN_CLASSES), len(all_probs)))}
         }
     except HTTPException as he:
         raise he
@@ -539,7 +618,7 @@ async def classify_skin_condition(file: UploadFile = File(...)) -> Dict:
             if not face_results.detections:
                  raise HTTPException(
                      status_code=400, 
-                     detail="Không tìm thấy khuôn mặt. Vui lòng chụp ảnh khuôn mặt rõ ràng để phân tích da."
+                     detail="No face detected. Please upload a clear image of a face for skin condition analysis."
                  )
         else:
             print("⚠️ Face detector skipped (not loaded)")
@@ -623,7 +702,7 @@ async def segment_skin_lesion(file: UploadFile = File(...)) -> Dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 # =============================================================================
-# FACE DETECTION ENDPOINT (FIXED RETURN TYPE)
+# FACE DETECTION ENDPOINT
 # =============================================================================
 @app.post("/api/face-detection")
 async def face_detection(file: UploadFile = File(...)) -> Dict[str, bool]:
@@ -633,7 +712,7 @@ async def face_detection(file: UploadFile = File(...)) -> Dict[str, bool]:
     """
     if state.face_detector is None:
         print("⚠️  Face detection model not loaded")
-        return {"has_face": True} # Fail open if model missing
+        return {"has_face": True} 
     try:
         content = await file.read()
         image = Image.open(io.BytesIO(content)).convert("RGB")
