@@ -109,25 +109,48 @@ class AIEngine:
 
     def _load_segmentation_model(self):
         path = settings.MODEL_SEGMENTATION
-        if not path.exists(): return None
+        # Nếu chưa có file model, trả về None (hoặc thêm logic download ở đây)
+        if not path.exists(): 
+            print(f"⚠️ Segmentation model not found at {path}")
+            return None
+            
         try:
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
-            import sam2
+            import requests # Cần import thêm requests
             
             checkpoint = torch.load(path, map_location=device, weights_only=False)
             if not isinstance(checkpoint, dict) or 'config' not in checkpoint: return None
             
-            # SAM2 Config resolution
+            # 1. Xác định tên config
             config_name = checkpoint['config'].get('sam2_config', 'sam2.1_hiera_t')
-            config_map = {'sam2.1_hiera_t': 'configs/sam2.1/sam2.1_hiera_t.yaml', 'sam2.1_hiera_s': 'configs/sam2.1/sam2.1_hiera_s.yaml'}
-            config_file = config_map.get(config_name, 'configs/sam2.1/sam2.1_hiera_t.yaml')
+            # Mapping tên file
+            config_filename = "sam2.1_hiera_t.yaml" if "t" in config_name else "sam2.1_hiera_s.yaml"
             
-            sam2_path = os.path.dirname(sam2.__file__)
-            config_path = os.path.join(sam2_path, '..', config_file)
-            if not os.path.exists(config_path): config_path = os.path.join(sam2_path, config_file)
+            # 2. Tạo đường dẫn file config nằm ngay trong thư mục models của bạn cho an toàn
+            local_config_path = settings.MODELS_DIR / config_filename
+            
+            # 3. Nếu chưa có file yaml, tải về từ GitHub chính chủ
+            if not local_config_path.exists():
+                print(f"⬇️ Downloading config {config_filename}...")
+                url = f"https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/sam2/configs/sam2.1/{config_filename}"
+                response = requests.get(url)
+                if response.status_code == 200:
+                    with open(local_config_path, 'wb') as f:
+                        f.write(response.content)
+                else:
+                    print("❌ Cannot download SAM2 config")
+                    return None
 
-            sam2_model = build_sam2(config_file=config_path, ckpt_path=None, device=device, mode='eval', apply_postprocessing=False)
+            # 4. Load model với đường dẫn config tuyệt đối
+            sam2_model = build_sam2(
+                config_file=str(local_config_path), # Dùng file vừa tải
+                ckpt_path=None, 
+                device=device, 
+                mode='eval', 
+                apply_postprocessing=False
+            )
+            
             if 'model_state_dict' in checkpoint:
                 sam2_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
             
@@ -135,12 +158,6 @@ class AIEngine:
         except Exception as e:
             print(f"❌ Error loading SAM2: {e}")
             return None
-
-    def _load_face_detection_model(self):
-        try:
-            mp_face = mp.solutions.face_detection
-            return mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
-        except: return None
 
     # --- Inference Methods ---
 
