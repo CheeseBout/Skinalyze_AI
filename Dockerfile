@@ -1,5 +1,5 @@
 # Sử dụng Python 3.10 (ổn định cho PyTorch và Mediapipe)
-FROM python:3.10-slim
+FROM python:3.10-slim-bookworm
 
 # Thiết lập thư mục làm việc
 WORKDIR /app
