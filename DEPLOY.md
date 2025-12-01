@@ -1,12 +1,12 @@
-# 🚀 Hướng dẫn triển khai RAG Cosmetic Chatbot
+# 🚀 Hướng dẫn triển khai AI Dermatology & Cosmetic Consultant API
 
 ## 📦 Các bước đóng gói và upload lên GitHub
 
-### **Bước 1: Di chuyển files vào đúng thư mục**
+### **Bước 1: Kiểm tra cấu trúc project**
 
 ```bash
 # Di chuyển vào thư mục project
-cd C:\FPT\RAG
+cd C:\Users\triba\Documents\VisualStudio2017\AI\Skinalyze_AI
 
 # Di chuyển file data vào thư mục data/
 move product_chunks.txt data\
@@ -28,19 +28,34 @@ notepad .env
 Đảm bảo cấu trúc như sau:
 
 ```
-C:\FPT\RAG\
-├── RAG_cosmetic.py
-├── config.py
+Skinalyze_AI/
+├── app/
+│   ├── __init__.py
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── routes.py          # Tất cả API endpoints
+│   ├── core/
+│   │   ├── __init__.py
+│   │   └── config.py          # Configuration & environment variables
+│   ├── model/
+│   │   ├── __init__.py
+│   │   └── schemas.py         # Pydantic models cho request/response
+│   └── services/
+│       ├── __init__.py
+│       ├── ai_engine.py       # AI/ML model loading & inference
+│       └── rag_engine.py      # RAG chatbot logic
+├── data/
+│   ├── product_chunks.txt     # Product data cho RAG
+│   └── fixed_cosmetic.csv     # Product database
+├── models/                     # Pre-trained AI models (gitignored)
+├── db_chroma/                 # Vector database (auto-generated)
+├── main.py                    # FastAPI application entry point
 ├── requirements.txt
 ├── .env.example
-├── .env              # ← Không commit file này!
+├── .env                       # ← Không commit file này!
 ├── .gitignore
 ├── README.md
-├── DEPLOY.md
-├── data/
-│   ├── product_chunks.txt
-│   └── cosmetics.csv
-└── (db_chroma/ và chat_history/ sẽ tự tạo khi chạy)
+└── DEPLOY.md
 ```
 
 ### **Bước 4: Khởi tạo Git repository**

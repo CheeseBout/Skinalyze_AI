@@ -3,33 +3,69 @@
 ## ✅ Các file đã tạo:
 
 - [x] `requirements.txt` - Dependencies
-- [x] `config.py` - Configuration
 - [x] `.env.example` - Template API key
 - [x] `.gitignore` - Git ignore rules
 - [x] `README.md` - Documentation
 - [x] `DEPLOY.md` - Deployment guide
 - [x] `setup.bat` - Windows setup script
 - [x] `setup.sh` - Linux/Mac setup script
+- [x] `main.py` - FastAPI application entry point
+- [x] `app/` - Application package structure
+  - [x] `app/__init__.py` - Package initialization
+  - [x] `app/api/` - API endpoints layer
+    - [x] `app/api/__init__.py`
+    - [x] `app/api/routes.py` - All API endpoints
+  - [x] `app/core/` - Core configurations
+    - [x] `app/core/__init__.py`
+    - [x] `app/core/config.py` - Environment variables & settings
+  - [x] `app/model/` - Data models
+    - [x] `app/model/__init__.py`
+    - [x] `app/model/schemas.py` - Pydantic request/response models
+  - [x] `app/services/` - Business logic
+    - [x] `app/services/__init__.py`
+    - [x] `app/services/ai_engine.py` - AI/ML model loading & inference
+    - [x] `app/services/rag_engine.py` - RAG chatbot logic
 
 ## 🗂️ Cấu trúc cuối cùng:
 
+
 ```
-C:\FPT\RAG\
-├── RAG_cosmetic.py          # ✅ Main file
-├── config.py                # ✅ Config
-├── requirements.txt         # ✅ Dependencies
-├── .env.example            # ✅ Template
-├── .gitignore              # ✅ Git rules
-├── README.md               # ✅ Documentation
-├── DEPLOY.md               # ✅ Deploy guide
-├── setup.bat               # ✅ Windows setup
-├── setup.sh                # ✅ Linux setup
-├── test_vlm.py             # ⚠️ Optional (có thể xóa)
-├── check_models.py         # ⚠️ Optional (có thể xóa)
+Skinalyze_AI/
+├── app/
+│ ├── init.py # ✅ Package init
+│ ├── api/
+│ │ ├── init.py # ✅ API package init
+│ │ └── routes.py # ✅ All API endpoints
+│ ├── core/
+│ │ ├── init.py # ✅ Core package init
+│ │ └── config.py # ✅ Configuration & environment variables
+│ ├── model/
+│ │ ├── init.py # ✅ Model package init
+│ │ └── schemas.py # ✅ Pydantic models for request/response
+│ └── services/
+│ ├── init.py # ✅ Services package init
+│ ├── ai_engine.py # ✅ AI/ML model loading & inference
+│ └── rag_engine.py # ✅ RAG chatbot logic
 ├── data/
-│   ├── product_chunks.txt  # ⚠️ DI CHUYỂN VÀO ĐÂY!
-│   └── cosmetics.csv       # ⚠️ DI CHUYỂN VÀO ĐÂY!
-└── (db_chroma/ - tự tạo khi chạy)
+│ ├── product_chunks.txt # ⚠️ DI CHUYỂN VÀO ĐÂY!
+│ └── fixed_cosmetic.csv # ⚠️ DI CHUYỂN VÀO ĐÂY!
+├── models/ # ⚠️ Pre-trained models (gitignored)
+│ ├── classification_model.pth # Disease classification model
+│ ├── segmentation_model.pth # SAM2 segmentation model
+│ ├── condition_model.pth # Skin condition model
+│ └── face_detection_model.pth # Face detection model
+├── db_chroma/ # Auto-generated vector database (gitignored)
+├── logs/ # Application logs (gitignored)
+├── main.py # ✅ FastAPI application entry
+├── requirements.txt # ✅ Dependencies
+├── .env.example # ✅ Template
+├── .env # ⚠️ Local only - KHÔNG COMMIT!
+├── .gitignore # ✅ Git rules
+├── README.md # ✅ Documentation
+├── DEPLOY.md # ✅ Deploy guide
+├── GITHUB_CHECKLIST.md # ✅ This file
+├── setup.bat # ✅ Windows setup
+└── setup.sh # ✅ Linux/Mac setup
 ```
 
 ---

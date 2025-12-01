@@ -8,7 +8,6 @@ Chatbot tư vấn mỹ phẩm thông minh kết hợp RAG, VLM và Conversation 
 - 📸 **VLM (Vision Language Model)**: Phân tích ảnh da, xác định mức độ nghiêm trọng
 - 🧠 **Conversation Memory**: Nhớ ngữ cảnh trong suốt phiên chat
 - ⚠️ **Severity Detection**: Cảnh báo gặp bác sĩ nếu tình trạng da rất nghiêm trọng
-- 💾 **Chat History**: Lưu lịch sử hội thoại
 
 ## 🛠️ Công nghệ
 
