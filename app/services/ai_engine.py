@@ -128,6 +128,7 @@ class AIEngine:
         try:
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
+            import sam2 # Import module để tìm đường dẫn cài đặt
             
             checkpoint = torch.load(path, map_location=device, weights_only=False)
             if not isinstance(checkpoint, dict) or 'config' not in checkpoint: return None
@@ -136,33 +137,41 @@ class AIEngine:
             config_name = checkpoint['config'].get('sam2_config', 'sam2.1_hiera_t')
             config_filename = "sam2.1_hiera_t.yaml" if "t" in config_name else "sam2.1_hiera_s.yaml"
             
-            # 2. Tạo đường dẫn tuyệt đối (Absolute Path) để tránh lỗi Hydra
-            # Docker WORKDIR là /app, nên models nằm ở /app/models
-            local_config_path = settings.MODELS_DIR / config_filename
-            abs_config_path = str(local_config_path.resolve()) # Lấy đường dẫn tuyệt đối
+            # 2. MẸO QUAN TRỌNG: Tìm đường dẫn cài đặt của thư viện sam2 trong Docker
+            # Thường là /usr/local/lib/python3.10/site-packages/sam2
+            sam2_base_dir = os.path.dirname(sam2.__file__)
             
-            # 3. Download config nếu chưa có
-            if not local_config_path.exists():
-                print(f"⬇️ Downloading config {config_filename}...")
+            # Tạo đường dẫn đích bên trong thư mục configs của thư viện
+            # Cấu trúc đích: .../sam2/configs/sam2.1/sam2.1_hiera_t.yaml
+            target_config_dir = os.path.join(sam2_base_dir, "configs", "sam2.1")
+            os.makedirs(target_config_dir, exist_ok=True) # Tạo folder nếu chưa có
+            
+            target_config_path = os.path.join(target_config_dir, config_filename)
+            
+            # 3. Download config thẳng vào thư mục của thư viện
+            if not os.path.exists(target_config_path):
+                print(f"⬇️ Downloading config to library path: {target_config_path}...")
                 url = f"https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/sam2/configs/sam2.1/{config_filename}"
                 try:
                     response = requests.get(url, timeout=10)
                     if response.status_code == 200:
-                        with open(local_config_path, 'wb') as f:
+                        with open(target_config_path, 'wb') as f:
                             f.write(response.content)
-                        print(f"✅ Config downloaded to {abs_config_path}")
+                        print("✅ Config downloaded successfully.")
                     else:
-                        print(f"❌ Cannot download SAM2 config from GitHub. Status: {response.status_code}")
+                        print(f"❌ Cannot download config. Status: {response.status_code}")
                         return None
                 except Exception as dl_err:
                      print(f"❌ Download error: {dl_err}")
                      return None
 
             # 4. Load model
-            # Lưu ý: build_sam2 cần đường dẫn file config .yaml chính xác
-            print(f"🔍 Loading SAM2 with config: {abs_config_path}")
+            # Khi file nằm đúng trong folder configs của thư viện, ta chỉ cần gọi tên file tương đối
+            relative_config_path = f"configs/sam2.1/{config_filename}"
+            
+            print(f"🔍 Loading SAM2 with relative config: {relative_config_path}")
             sam2_model = build_sam2(
-                config_file=abs_config_path, 
+                config_file=relative_config_path, # Hydra sẽ tìm thấy file này trong package
                 ckpt_path=None, 
                 device=device, 
                 mode='eval', 
@@ -175,7 +184,6 @@ class AIEngine:
             return SAM2ImagePredictor(sam2_model)
         except Exception as e:
             print(f"❌ Error loading SAM2: {e}")
-            # Trả về None để app vẫn chạy được các tính năng khác
             return None
 
     # --- Inference Methods ---
