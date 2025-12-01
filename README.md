@@ -1,3 +1,15 @@
+---
+title: Skinalyze AI Dermatology
+emoji: 🧴
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 7860
+---
+
+# Skinalyze AI Project
+(Nội dung cũ của bạn cứ để ở dưới dòng này...)
 # 🧴 RAG Cosmetic Chatbot
 
 Chatbot tư vấn mỹ phẩm thông minh kết hợp RAG, VLM và Conversation Memory.
