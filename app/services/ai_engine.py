@@ -6,6 +6,7 @@ import mediapipe as mp
 import os
 import io
 import base64
+import requests
 from PIL import Image
 from app.core.config import settings
 
@@ -18,6 +19,7 @@ class AIEngine:
         self.segmentation_model = None
         self.skin_condition_model = None
         self.face_detector = None
+        
         self.transforms = {
             'classification': transforms.Compose([
                 transforms.Resize((224, 224)),
@@ -34,10 +36,22 @@ class AIEngine:
     def load_all_models(self):
         print("⏳ Loading AI Models...")
         self.classification_model = self._load_classification_model()
-        self.segmentation_model = self._load_segmentation_model()
         self.skin_condition_model = self._load_skin_condition_model()
+        # Quan trọng: Gọi load face detection sau khi đã chắc chắn hàm tồn tại
         self.face_detector = self._load_face_detection_model()
+        self.segmentation_model = self._load_segmentation_model()
         print("✅ AI Models Loaded.")
+
+    def _load_face_detection_model(self):
+        """Hàm này bị thiếu trong code cũ gây ra lỗi AttributeError"""
+        try:
+            print("⏳ Loading Face Detection...")
+            mp_face = mp.solutions.face_detection
+            # model_selection=0 cho khoảng cách gần (selfie), =1 cho khoảng cách xa
+            return mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+        except Exception as e:
+            print(f"⚠️ Face Detection failed to load: {e}")
+            return None
 
     def _load_classification_model(self):
         path = settings.MODEL_CLASSIFICATION
@@ -51,11 +65,10 @@ class AIEngine:
                 model.to(device).eval()
                 return model
             
-            # Reconstruction logic from original code
             state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
             model = models.efficientnet_b0(weights=None)
             
-            # Dynamic layer sizing based on weights
+            # Dynamic layer sizing
             linear1_out = 512
             linear2_out = 256
             num_classes = len(settings.SKIN_CLASSES)
@@ -92,7 +105,6 @@ class AIEngine:
             checkpoint = torch.load(path, map_location=device, weights_only=False)
             state_dict = checkpoint.get('model_state_dict') or checkpoint.get('state_dict') or checkpoint
             
-            # Try variants as per original code
             for variant_fn in [models.efficientnet_b0, models.efficientnet_b1, models.efficientnet_b2]:
                 try:
                     model = variant_fn(weights=None)
@@ -109,7 +121,6 @@ class AIEngine:
 
     def _load_segmentation_model(self):
         path = settings.MODEL_SEGMENTATION
-        # Nếu chưa có file model, trả về None (hoặc thêm logic download ở đây)
         if not path.exists(): 
             print(f"⚠️ Segmentation model not found at {path}")
             return None
@@ -117,34 +128,41 @@ class AIEngine:
         try:
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
-            import requests # Cần import thêm requests
             
             checkpoint = torch.load(path, map_location=device, weights_only=False)
             if not isinstance(checkpoint, dict) or 'config' not in checkpoint: return None
             
             # 1. Xác định tên config
             config_name = checkpoint['config'].get('sam2_config', 'sam2.1_hiera_t')
-            # Mapping tên file
             config_filename = "sam2.1_hiera_t.yaml" if "t" in config_name else "sam2.1_hiera_s.yaml"
             
-            # 2. Tạo đường dẫn file config nằm ngay trong thư mục models của bạn cho an toàn
+            # 2. Tạo đường dẫn tuyệt đối (Absolute Path) để tránh lỗi Hydra
+            # Docker WORKDIR là /app, nên models nằm ở /app/models
             local_config_path = settings.MODELS_DIR / config_filename
+            abs_config_path = str(local_config_path.resolve()) # Lấy đường dẫn tuyệt đối
             
-            # 3. Nếu chưa có file yaml, tải về từ GitHub chính chủ
+            # 3. Download config nếu chưa có
             if not local_config_path.exists():
                 print(f"⬇️ Downloading config {config_filename}...")
                 url = f"https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/sam2/configs/sam2.1/{config_filename}"
-                response = requests.get(url)
-                if response.status_code == 200:
-                    with open(local_config_path, 'wb') as f:
-                        f.write(response.content)
-                else:
-                    print("❌ Cannot download SAM2 config")
-                    return None
+                try:
+                    response = requests.get(url, timeout=10)
+                    if response.status_code == 200:
+                        with open(local_config_path, 'wb') as f:
+                            f.write(response.content)
+                        print(f"✅ Config downloaded to {abs_config_path}")
+                    else:
+                        print(f"❌ Cannot download SAM2 config from GitHub. Status: {response.status_code}")
+                        return None
+                except Exception as dl_err:
+                     print(f"❌ Download error: {dl_err}")
+                     return None
 
-            # 4. Load model với đường dẫn config tuyệt đối
+            # 4. Load model
+            # Lưu ý: build_sam2 cần đường dẫn file config .yaml chính xác
+            print(f"🔍 Loading SAM2 with config: {abs_config_path}")
             sam2_model = build_sam2(
-                config_file=str(local_config_path), # Dùng file vừa tải
+                config_file=abs_config_path, 
                 ckpt_path=None, 
                 device=device, 
                 mode='eval', 
@@ -157,6 +175,7 @@ class AIEngine:
             return SAM2ImagePredictor(sam2_model)
         except Exception as e:
             print(f"❌ Error loading SAM2: {e}")
+            # Trả về None để app vẫn chạy được các tính năng khác
             return None
 
     # --- Inference Methods ---
@@ -201,12 +220,10 @@ class AIEngine:
         mask = masks[0] if len(masks) > 0 else np.zeros(img_np.shape[:2], dtype=np.uint8)
         mask = (mask * 255).astype(np.uint8) if mask.dtype != np.uint8 else mask
         
-        # Create Black BG image
         black_bg = Image.new("RGB", image.size, (0,0,0))
         mask_pil = Image.fromarray(mask).convert("L").resize(image.size, Image.NEAREST)
         lesion_img = Image.composite(image, black_bg, mask_pil)
         
-        # Base64 Encode
         buf_mask = io.BytesIO()
         mask_pil.save(buf_mask, format="PNG")
         
@@ -220,8 +237,11 @@ class AIEngine:
         }
 
     def detect_face(self, image: Image.Image) -> bool:
-        if not self.face_detector: return True # Fail open if model missing
-        res = self.face_detector.process(np.array(image))
-        return bool(res.detections)
+        if not self.face_detector: return True 
+        try:
+            res = self.face_detector.process(np.array(image))
+            return bool(res.detections)
+        except:
+            return True # Fail safe
 
 ai_engine = AIEngine()
