@@ -83,24 +83,65 @@ async def analyze_image_file(image: UploadFile = File(...), additional_text: Opt
 
 @router.post("/api/classification-disease")
 async def classify_disease(file: UploadFile = File(...), notes: Optional[str] = Form(None)):
-    if not ai_engine.classification_model: raise HTTPException(503, "Model not loaded")
+    if not ai_engine.classification_model: 
+        raise HTTPException(503, "Model not loaded")
+    
     img = Image.open(io.BytesIO(await file.read())).convert("RGB")
     
     try:
         check_face = (notes == 'facial')
         cls, conf, all_preds = ai_engine.predict_disease(img, check_face)
-        return {"predicted_class": cls, "confidence": conf, "all_predictions": all_preds}
+        
+        # Gọi RAG để gợi ý sản phẩm dựa trên bệnh da
+        product_suggestions = []
+        if rag_engine.rag_chain:
+            # Tạo query cho RAG
+            query = f"Tôi bị bệnh da {cls}. Gợi ý sản phẩm điều trị."
+            rag_response = rag_engine.rag_chain.invoke(query)
+            
+            # Trích xuất tên sản phẩm từ response
+            product_suggestions = rag_engine.extract_product_names(rag_response)
+        
+        return {
+            "predicted_class": cls,
+            "confidence": conf,
+            "all_predictions": all_preds,
+            "product_suggestions": product_suggestions
+        }
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 @router.post("/api/classification-condition")
 async def classify_condition(file: UploadFile = File(...)):
-    if not ai_engine.skin_condition_model: raise HTTPException(503, "Model not loaded")
+    if not ai_engine.skin_condition_model: 
+        raise HTTPException(503, "Model not loaded")
+    
     img = Image.open(io.BytesIO(await file.read())).convert("RGB")
     
     try:
+        # Dự đoán tình trạng da (Dry, Normal, Oily)
         cond, conf, all_preds = ai_engine.predict_condition(img)
-        return {"predicted_condition": cond, "confidence": conf, "all_predictions": all_preds, "face_detected": True}
+        
+        # Kiểm tra khuôn mặt
+        has_face = ai_engine.detect_face(img)
+
+        # Gọi RAG để gợi ý sản phẩm dựa trên tình trạng da
+        product_suggestions = []
+        if rag_engine.rag_chain:
+            # Tạo query cho RAG dựa trên loại da
+            query = f"Tôi có loại da {cond}. Gợi ý sản phẩm chăm sóc da phù hợp."
+            rag_response = rag_engine.rag_chain.invoke(query)
+            
+            # Trích xuất tên sản phẩm từ response
+            product_suggestions = rag_engine.extract_product_names(rag_response)
+
+        return {
+            "predicted_condition": cond, 
+            "confidence": conf, 
+            "all_predictions": all_preds, 
+            "face_detected": has_face,
+            "product_suggestions": product_suggestions
+        }
     except ValueError as e:
         raise HTTPException(400, str(e))
 

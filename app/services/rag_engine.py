@@ -132,14 +132,50 @@ class RAGEngine:
             if name not in grouped: grouped[name] = []
             grouped[name].append(d.page_content)
         
-        # Take top 2
+        # Take top 3
         result = []
-        for name in list(grouped.keys())[:2]:
+        for name in list(grouped.keys())[:3]:
             text = "\n".join(grouped[name])
             # Convert Price
             text = re.sub(r'\$([0-9]+(?:\.[0-9]+)?)', 
                           lambda m: f"{int(float(m.group(1)) * settings.USD_TO_VND):,} VND", text)
             result.append(f"=== {name} ===\n{text}")
         return "\n\n".join(result)
+
+def extract_product_names(self, rag_response: str) -> list:
+        """
+        Trích xuất tên sản phẩm từ RAG response
+        Returns: List of product names only
+        """
+        product_names = []
+        
+        # Pattern 1: Tìm các dòng có "=== Product Name ==="
+        pattern1 = r'===\s*(.+?)\s*==='
+        matches1 = re.findall(pattern1, rag_response)
+        product_names.extend(matches1)
+        
+        # Pattern 2: Tìm "Product Name: ..."
+        pattern2 = r'Product Name:\s*(.+?)(?:\n|$)'
+        matches2 = re.findall(pattern2, rag_response, re.IGNORECASE)
+        product_names.extend(matches2)
+        
+        # Pattern 3: Tìm các dòng bắt đầu bằng số (1. Product, 2. Product)
+        pattern3 = r'\d+\.\s*([^\n]+?)(?:\s*-|\s*\(|$)'
+        matches3 = re.findall(pattern3, rag_response)
+        product_names.extend(matches3)
+        
+        # Loại bỏ trùng lặp và clean up
+        seen = set()
+        cleaned = []
+        for name in product_names:
+            name = name.strip()
+            # Loại bỏ các ký tự đặc biệt ở cuối
+            name = re.sub(r'[\:\-\(].*$', '', name).strip()
+            if name and name not in seen and len(name) > 3:
+                seen.add(name)
+                cleaned.append(name)
+        
+        # Giới hạn tối đa 5 sản phẩm
+        return cleaned[:5]
 
 rag_engine = RAGEngine()
