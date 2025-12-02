@@ -178,15 +178,34 @@ class RAGEngine:
         cleaned = []
         for name in product_names:
             name = name.strip()
+            
+            # Loại bỏ giá tiền (VND, USD, số tiền)
+            name = re.sub(r'\d+[,\.\d]*\s*(VND|USD|đ|vnđ)', '', name, flags=re.IGNORECASE).strip()
+            name = re.sub(r'[\$€£¥₫]\s*\d+[,\.\d]*', '', name).strip()
+            
             # Loại bỏ các ký tự đặc biệt ở cuối
             name = re.sub(r'[\:\-\(\)].*$', '', name).strip()
+            
             # Loại bỏ các từ không phải tên sản phẩm
             if name and name not in seen and len(name) > 5:
-                # Bỏ qua các từ chung chung
-                skip_words = ['Đặc điểm', 'Features', 'Giá', 'Price', 'Khuyến mãi', 'Promotion', 'Công dụng', 'Benefits', 'Thành phần', 'Ingredients']
-                if not any(sw.lower() in name.lower() for sw in skip_words):
-                    seen.add(name)
-                    cleaned.append(name)
+                # Bỏ qua các từ chung chung và số tiền
+                skip_words = ['Đặc điểm', 'Features', 'Giá', 'Price', 'Khuyến mãi', 'Promotion', 'Công dụng', 'Benefits', 'Thành phần', 'Ingredients', '000 VND', 'VND', 'USD']
+                skip_patterns = [r'^\d+[\.,\d]*$', r'^VND$', r'^USD$']
+                
+                # Check skip words
+                if any(sw.lower() in name.lower() for sw in skip_words):
+                    continue
+                    
+                # Check skip patterns
+                if any(re.match(pattern, name.strip()) for pattern in skip_patterns):
+                    continue
+                
+                # Bỏ qua nếu chỉ chứa số và ký tự đặc biệt
+                if re.match(r'^[\d\s\.,\-]+$', name):
+                    continue
+                
+                seen.add(name)
+                cleaned.append(name)
         
         # Giới hạn tối đa 5 sản phẩm
         return cleaned[:5]
