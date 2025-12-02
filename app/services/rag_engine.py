@@ -132,9 +132,9 @@ class RAGEngine:
             if name not in grouped: grouped[name] = []
             grouped[name].append(d.page_content)
         
-        # Take top 3
+        # Take top 2
         result = []
-        for name in list(grouped.keys())[:3]:
+        for name in list(grouped.keys())[:2]:
             text = "\n".join(grouped[name])
             # Convert Price
             text = re.sub(r'\$([0-9]+(?:\.[0-9]+)?)', 
@@ -142,11 +142,12 @@ class RAGEngine:
             result.append(f"=== {name} ===\n{text}")
         return "\n\n".join(result)
 
-def extract_product_names(self, rag_response: str) -> list:
+    def extract_product_names(self, rag_response: str) -> list:
         """
         Trích xuất tên sản phẩm từ RAG response
         Returns: List of product names only
         """
+        import re
         product_names = []
         
         # Pattern 1: Tìm các dòng có "=== Product Name ==="
