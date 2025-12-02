@@ -21,13 +21,15 @@ class RAGEngine:
         self.embeddings = None
         self.skin_map = {
             "acne": ["Hỗn hợp", "Dầu", "Nhạy cảm"],
-            "mụn": ["Hỗn hợp", "Dầu", "Nhạy cảm"],
+            "actinic_keratosis": ["Khô", "Thường"],
+            # "drug_eruption": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],
             "eczema": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],
-            "chàm": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],
-            "psoriasis": ["Khô"], "vảy nến": ["Khô"],
+            "psoriasis": ["Khô"],
             "rosacea": ["Hỗn hợp", "Dầu", "Nhạy cảm"],
+            "seborrheic_keratoses": ["Thường", "Dầu", "Nhạy cảm"],
             "sun damage": ["Hỗn hợp", "Khô", "Thường", "Nhạy cảm"],
-            "tinea": ["Hỗn hợp", "Dầu"], "nấm": ["Hỗn hợp", "Dầu"]
+            "tinea": ["Hỗn hợp", "Dầu"],
+            "warts": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"]
         }
 
     def initialize(self):
@@ -178,5 +180,31 @@ class RAGEngine:
         
         # Giới hạn tối đa 5 sản phẩm
         return cleaned[:5]
+
+    def get_skin_types_from_disease(self, disease_class: str) -> list:
+        """
+        Suy ra loại da từ bệnh da dựa trên skin_map
+        Returns: List of skin types (e.g., ["Hỗn hợp", "Dầu"])
+        """
+        # Chuẩn hóa disease_class về lowercase và thay thế khoảng trắng bằng underscore
+        disease_normalized = disease_class.lower().replace(" ", "_")
+        
+        # Tìm trực tiếp trong skin_map
+        if disease_normalized in self.skin_map:
+            return self.skin_map[disease_normalized]
+        
+        # Thử tìm với các biến thể khác
+        # Ví dụ: "Sun_Sunlight_Damage" -> "sun damage"
+        disease_variants = [
+            disease_normalized.replace("_", " "),  # sun_sunlight_damage -> sun sunlight damage
+            disease_normalized.split("_")[0],       # sun_sunlight_damage -> sun
+        ]
+        
+        for variant in disease_variants:
+            if variant in self.skin_map:
+                return self.skin_map[variant]
+        
+        # Fallback: trả về tất cả loại da
+        return ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"]
 
 rag_engine = RAGEngine()

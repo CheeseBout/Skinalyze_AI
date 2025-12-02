@@ -94,19 +94,38 @@ async def classify_disease(file: UploadFile = File(...), notes: Optional[str] = 
         
         # Gọi RAG để gợi ý sản phẩm dựa trên bệnh da
         product_suggestions = []
+        rag_response = ""
+        fallback_used = False
+        
         if rag_engine.rag_chain:
-            # Tạo query cho RAG
-            query = f"Tôi bị bệnh da {cls}. Gợi ý sản phẩm điều trị."
-            rag_response = rag_engine.rag_chain.invoke(query)
-            
-            # Trích xuất tên sản phẩm từ response
-            product_suggestions = rag_engine.extract_product_names(rag_response)
+            try:
+                # Bước 1: Thử tìm sản phẩm điều trị bệnh da
+                query = f"Tôi bị bệnh da {cls}. Gợi ý sản phẩm điều trị."
+                rag_response = rag_engine.rag_chain.invoke(query)
+                product_suggestions = rag_engine.extract_product_names(rag_response)
+                
+                # Bước 2: Nếu không tìm thấy sản phẩm → fallback sang loại da
+                if not product_suggestions or "KHÔNG TÌM THẤY" in rag_response:
+                    fallback_used = True
+                    # Suy ra loại da từ bệnh
+                    skin_types = rag_engine.get_skin_types_from_disease(cls)
+                    skin_types_str = ", ".join(skin_types)
+                    
+                    # Tạo query mới dựa trên loại da
+                    query = f"Tôi có loại da {skin_types_str}. Gợi ý sản phẩm chăm sóc da phù hợp."
+                    rag_response = rag_engine.rag_chain.invoke(query)
+                    product_suggestions = rag_engine.extract_product_names(rag_response)
+                    
+            except Exception as e:
+                print(f"RAG Error: {e}")
+                product_suggestions = []
         
         return {
             "predicted_class": cls,
             "confidence": conf,
             "all_predictions": all_preds,
-            "product_suggestions": product_suggestions
+            "product_suggestions": product_suggestions,
+            "suggestion_note": f"Sản phẩm cho bệnh {cls}" if not fallback_used else f"Sản phẩm cho loại da (từ {cls})"
         }
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -128,19 +147,31 @@ async def classify_condition(file: UploadFile = File(...)):
         # Gọi RAG để gợi ý sản phẩm dựa trên tình trạng da
         product_suggestions = []
         if rag_engine.rag_chain:
-            # Tạo query cho RAG dựa trên loại da
-            query = f"Tôi có loại da {cond}. Gợi ý sản phẩm chăm sóc da phù hợp."
-            rag_response = rag_engine.rag_chain.invoke(query)
+            # Mapping condition sang từ khóa tiếng Việt
+            condition_mapping = {
+                "Oily": "Dầu",
+                "Dry": "Khô", 
+                "Normal": "Thường"
+            }
             
-            # Trích xuất tên sản phẩm từ response
-            product_suggestions = rag_engine.extract_product_names(rag_response)
+            skin_type_vn = condition_mapping.get(cond, cond)
+            
+            # Tạo query cho RAG dựa trên loại da
+            query = f"Tôi có loại da {skin_type_vn}. Gợi ý sản phẩm chăm sóc da phù hợp."
+            
+            try:
+                rag_response = rag_engine.rag_chain.invoke(query)
+                product_suggestions = rag_engine.extract_product_names(rag_response)
+            except Exception as e:
+                print(f"RAG Error: {e}")
 
         return {
             "predicted_condition": cond, 
             "confidence": conf, 
             "all_predictions": all_preds, 
             "face_detected": has_face,
-            "product_suggestions": product_suggestions
+            "product_suggestions": product_suggestions,
+            "suggestion_note": f"Sản phẩm cho da {cond}"
         }
     except ValueError as e:
         raise HTTPException(400, str(e))
