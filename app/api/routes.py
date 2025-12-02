@@ -100,21 +100,25 @@ async def classify_disease(file: UploadFile = File(...), notes: Optional[str] = 
         if rag_engine.rag_chain:
             try:
                 # Bước 1: Thử tìm sản phẩm điều trị bệnh da
-                query = f"Tôi bị bệnh da {cls}. Gợi ý sản phẩm điều trị."
+                query = f"Tôi bị bệnh da {cls}. Gợi ý 5 sản phẩm điều trị tốt nhất. Chỉ liệt kê tên sản phẩm."
                 rag_response = rag_engine.rag_chain.invoke(query)
                 product_suggestions = rag_engine.extract_product_names(rag_response)
                 
-                # Bước 2: Nếu không tìm thấy sản phẩm → fallback sang loại da
-                if not product_suggestions or "KHÔNG TÌM THẤY" in rag_response:
+                # Bước 2: Nếu không tìm thấy đủ sản phẩm → fallback sang loại da
+                if len(product_suggestions) < 3 or "KHÔNG TÌM THẤY" in rag_response:
                     fallback_used = True
                     # Suy ra loại da từ bệnh
                     skin_types = rag_engine.get_skin_types_from_disease(cls)
                     skin_types_str = ", ".join(skin_types)
                     
                     # Tạo query mới dựa trên loại da
-                    query = f"Tôi có loại da {skin_types_str}. Gợi ý sản phẩm chăm sóc da phù hợp."
+                    query = f"Tôi có loại da {skin_types_str}. Gợi ý 5 sản phẩm chăm sóc da phù hợp. Chỉ liệt kê tên sản phẩm."
                     rag_response = rag_engine.rag_chain.invoke(query)
-                    product_suggestions = rag_engine.extract_product_names(rag_response)
+                    new_suggestions = rag_engine.extract_product_names(rag_response)
+                    
+                    # Merge và remove duplicates
+                    product_suggestions.extend(new_suggestions)
+                    product_suggestions = list(dict.fromkeys(product_suggestions))[:5]
                     
             except Exception as e:
                 print(f"RAG Error: {e}")
@@ -157,7 +161,7 @@ async def classify_condition(file: UploadFile = File(...)):
             skin_type_vn = condition_mapping.get(cond, cond)
             
             # Tạo query cho RAG dựa trên loại da
-            query = f"Tôi có loại da {skin_type_vn}. Gợi ý sản phẩm chăm sóc da phù hợp."
+            query = f"Tôi có loại da {skin_type_vn}. Gợi ý 5 sản phẩm chăm sóc da phù hợp. Chỉ liệt kê tên sản phẩm."
             
             try:
                 rag_response = rag_engine.rag_chain.invoke(query)

@@ -135,9 +135,9 @@ class RAGEngine:
             if name not in grouped: grouped[name] = []
             grouped[name].append(d.page_content)
         
-        # Take top 2
+        # Take top 5
         result = []
-        for name in list(grouped.keys())[:2]:
+        for name in list(grouped.keys())[:5]:
             text = "\n".join(grouped[name])
             # Convert Price
             text = re.sub(r'\$([0-9]+(?:\.[0-9]+)?)', 
@@ -164,9 +164,14 @@ class RAGEngine:
         product_names.extend(matches2)
         
         # Pattern 3: Tìm các dòng bắt đầu bằng số (1. Product, 2. Product)
-        pattern3 = r'\d+\.\s*([^\n]+?)(?:\s*-|\s*\(|$)'
+        pattern3 = r'\d+\.\s*\*?\*?([^\n\*]+?)(?:\s*[\:\-\(]|\*\*|$)'
         matches3 = re.findall(pattern3, rag_response)
         product_names.extend(matches3)
+        
+        # Pattern 4: Tìm các dòng có ** Product Name **
+        pattern4 = r'\*\*([^\*\n]+?)\*\*'
+        matches4 = re.findall(pattern4, rag_response)
+        product_names.extend(matches4)
         
         # Loại bỏ trùng lặp và clean up
         seen = set()
@@ -174,10 +179,14 @@ class RAGEngine:
         for name in product_names:
             name = name.strip()
             # Loại bỏ các ký tự đặc biệt ở cuối
-            name = re.sub(r'[\:\-\(].*$', '', name).strip()
-            if name and name not in seen and len(name) > 3:
-                seen.add(name)
-                cleaned.append(name)
+            name = re.sub(r'[\:\-\(\)].*$', '', name).strip()
+            # Loại bỏ các từ không phải tên sản phẩm
+            if name and name not in seen and len(name) > 5:
+                # Bỏ qua các từ chung chung
+                skip_words = ['Đặc điểm', 'Features', 'Giá', 'Price', 'Khuyến mãi', 'Promotion', 'Công dụng', 'Benefits', 'Thành phần', 'Ingredients']
+                if not any(sw.lower() in name.lower() for sw in skip_words):
+                    seen.add(name)
+                    cleaned.append(name)
         
         # Giới hạn tối đa 5 sản phẩm
         return cleaned[:5]
