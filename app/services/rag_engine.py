@@ -29,7 +29,8 @@ class RAGEngine:
             "seborrheic_keratoses": ["Thường", "Dầu", "Nhạy cảm"],
             "sun damage": ["Hỗn hợp", "Khô", "Thường", "Nhạy cảm"],
             "tinea": ["Hỗn hợp", "Dầu"],
-            "warts": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"]
+            "warts": ["Hỗn hợp", "Khô", "Thường", "Dầu", "Nhạy cảm"],
+            "normal": ["Thường"]
         }
 
     def initialize(self):
